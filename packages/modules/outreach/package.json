@@ -1,0 +1,26 @@
+{
+  "name": "@recon/outreach",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./schema/*": "./schema/*.ts",
+    "./router": "./router.ts",
+    "./trpc": "./trpc.ts",
+    "./services/*": "./services/*.ts",
+    "./events": "./events.ts"
+  },
+  "dependencies": {
+    "@recon/db": "workspace:*",
+    "@recon/shared": "workspace:*",
+    "@recon/events": "workspace:*",
+    "@recon/logger": "workspace:*",
+    "@trpc/server": "^11.0.0",
+    "drizzle-orm": "^0.38.0",
+    "superjson": "^2.2.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

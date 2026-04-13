@@ -1,0 +1,44 @@
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workers/**"
+
+jobs:
+  deploy:
+    name: Build & Deploy Lambda Functions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # TODO: Build each worker into a deployment artifact.
+      # Example: pnpm --filter ./workers/enrichment-worker build
+      - name: Build workers
+        run: echo "Build step placeholder -- implement per-worker build"
+
+      # TODO: Deploy Lambda functions.
+      # Actual deployment will be handled via Terraform apply (manual initially).
+      # This step can later be replaced with:
+      #   cd infra/terraform && terraform init && terraform apply -auto-approve
+      # Ensure AWS credentials are configured via GitHub secrets:
+      #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+      - name: Deploy
+        run: echo "Deploy step placeholder -- initial deployments via manual Terraform apply"

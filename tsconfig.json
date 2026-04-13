@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "paths": {
+      "@recon/db": ["./packages/db"],
+      "@recon/auth": ["./packages/auth"],
+      "@recon/events": ["./packages/events"],
+      "@recon/logger": ["./packages/logger"],
+      "@recon/ui/*": ["./packages/ui/*"],
+      "@recon/shared/*": ["./packages/modules/shared/*"],
+      "@recon/outreach/*": ["./packages/modules/outreach/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next"]
+}

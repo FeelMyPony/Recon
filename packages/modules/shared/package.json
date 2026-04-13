@@ -1,0 +1,17 @@
+{
+  "name": "@recon/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./schema/*": "./schema/*.ts",
+    "./types": "./types.ts"
+  },
+  "dependencies": {
+    "@recon/db": "workspace:*",
+    "drizzle-orm": "^0.38.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
