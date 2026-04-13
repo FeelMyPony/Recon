@@ -8,7 +8,8 @@
     "./router": "./router.ts",
     "./trpc": "./trpc.ts",
     "./services/*": "./services/*.ts",
-    "./events": "./events.ts"
+    "./events": "./events.ts",
+    "./seed-data": "./seed-data.ts"
   },
   "dependencies": {
     "@recon/db": "workspace:*",

@@ -73,6 +73,7 @@ Mailpit UI: http://localhost:8025 (catches magic link emails)
 - `pnpm typecheck` — TypeScript check
 - `pnpm db:generate` — Generate Drizzle migrations
 - `pnpm db:migrate` — Apply migrations
+- `pnpm db:seed` — Seed database with 10 dev leads
 - `pnpm db:studio` — Drizzle Studio (DB browser)
 
 ## Current State (as of 2026-04-13)
@@ -93,25 +94,28 @@ Mailpit UI: http://localhost:8025 (catches magic link emails)
 - CI/CD: GitHub Actions workflows
 - Docker compose: PostGIS + Mailpit
 
+### Done (Phase 3 — Backend Wiring)
+- Git repo initialized
+- tRPC queries wired to all components (map, table, topbar, analytics) with seed data fallback
+- Database seed script (10 dev leads, dev workspace, dev user)
+- Outscraper scraper Lambda worker (workers/scraper/handler.ts)
+- Claude AI review analyser Lambda worker (workers/analyser/handler.ts)
+- Emailer Lambda worker + SES webhook handler (workers/emailer/handler.ts, apps/web/api/webhooks/ses)
+- PostGIS nearby leads query (ST_DWithin radius search)
+- Mapbox clustering (GeoJSON source, cluster/uncluster layers, click-to-zoom)
+- Radius search UI on map (click-to-place centre, adjustable km slider, circle overlay)
+- Vercel deployment config (vercel.json, standalone output)
+
 ### Not Done Yet
-- **Outscraper integration**: Wire search modal -> SQS -> Lambda scraper -> DB
-- **Claude AI analysis**: Wire lead reviews -> Lambda analyser -> review_analyses table
-- **Auto lead scoring**: Score leads based on AI analysis output
-- **Real tRPC data**: Replace mock data in components with tRPC queries
-- **Email sending**: Wire outreach emails -> SQS -> Lambda emailer -> SES
-- **Open/click tracking**: SES webhook handler for email events
-- **Mapbox clustering**: Add cluster layer for dense lead areas
 - **CSV import/export**: Bulk lead operations via S3
 - **Team invitations**: Multi-user workspace access
-- **PostGIS geo queries**: Location-based lead filtering (within X km)
-- **AWS deployment**: Run Terraform, connect Vercel, run migrations
-- **Git repo**: Not initialized yet
+- **AWS deployment**: Run Terraform, run migrations on RDS
 
 ## Rules
 - Always use the module-first pattern — new features go in their module, not shared
 - Keep `.js` extensions OUT of TypeScript imports (Next.js bundler can't resolve them)
 - Use `getDb()` not `db` directly when the code might run during build
 - API routes need `export const dynamic = "force-dynamic"`
-- Mock data lives in components temporarily — replace with tRPC queries
+- Components use tRPC queries with SEED_LEADS fallback for offline/no-DB dev
 - Don't add Supabase-specific patterns (no `auth.uid()`, no `auth.users`)
 - Brand colors: use Tailwind classes (`bg-brand-navy-900`, `text-brand-teal`) not inline styles

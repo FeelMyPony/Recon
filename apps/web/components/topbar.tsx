@@ -1,10 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { Search, Sparkles, X } from "lucide-react";
+import { Search, Sparkles, X, Loader2 } from "lucide-react";
+import { trpc } from "../lib/trpc/client";
 
 export function Topbar() {
   const [showSearch, setShowSearch] = useState(false);
+
+  // Quick stats from tRPC
+  const { data: stats } = trpc.outreach.stats.useQuery(undefined, {
+    retry: false,
+  });
 
   return (
     <>
@@ -18,18 +24,18 @@ export function Topbar() {
           </span>
         </div>
 
-        {/* Quick stats — will be wired to tRPC */}
+        {/* Quick stats — wired to tRPC */}
         <div className="hidden items-center gap-4 text-xs text-slate-500 sm:flex">
           <span>
-            <strong className="text-brand-navy-900">0</strong> leads
+            <strong className="text-brand-navy-900">{stats?.total ?? 0}</strong> leads
           </span>
           <span className="h-4 w-px bg-slate-200" />
           <span>
-            <strong className="text-brand-teal">0</strong> with email
+            <strong className="text-brand-teal">{stats?.withEmail ?? 0}</strong> with email
           </span>
           <span className="h-4 w-px bg-slate-200" />
           <span>
-            <strong className="text-red-500">0</strong> hot
+            <strong className="text-red-500">{stats?.hot ?? 0}</strong> hot
           </span>
         </div>
 
@@ -53,6 +59,28 @@ export function Topbar() {
 function SearchModal({ onClose }: { onClose: () => void }) {
   const [category, setCategory] = useState("NDIS Provider");
   const [location, setLocation] = useState("Melbourne VIC");
+  const [minRating, setMinRating] = useState("any");
+  const [mustHave, setMustHave] = useState("none");
+
+  const utils = trpc.useUtils();
+  const createSearch = trpc.outreach.searches.create.useMutation({
+    onSuccess: () => {
+      utils.outreach.leads.list.invalidate();
+      utils.outreach.stats.invalidate();
+      onClose();
+    },
+  });
+
+  const handleSubmit = () => {
+    createSearch.mutate({
+      query: category,
+      location,
+      filters: {
+        minRating: minRating !== "any" ? parseFloat(minRating) : undefined,
+        mustHave: mustHave !== "none" ? mustHave : undefined,
+      },
+    });
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-brand-navy-900/60 pt-24 backdrop-blur-sm">
@@ -100,23 +128,31 @@ function SearchModal({ onClose }: { onClose: () => void }) {
                 <label className="mb-1 block text-xs font-medium text-slate-500">
                   Min Rating
                 </label>
-                <select className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900">
-                  <option>Any</option>
-                  <option>3.0+</option>
-                  <option>3.5+</option>
-                  <option>4.0+</option>
-                  <option>4.5+</option>
+                <select
+                  value={minRating}
+                  onChange={(e) => setMinRating(e.target.value)}
+                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900"
+                >
+                  <option value="any">Any</option>
+                  <option value="3.0">3.0+</option>
+                  <option value="3.5">3.5+</option>
+                  <option value="4.0">4.0+</option>
+                  <option value="4.5">4.5+</option>
                 </select>
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-500">
                   Must Have
                 </label>
-                <select className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900">
-                  <option>No filter</option>
-                  <option>Email</option>
-                  <option>Website</option>
-                  <option>Phone</option>
+                <select
+                  value={mustHave}
+                  onChange={(e) => setMustHave(e.target.value)}
+                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900"
+                >
+                  <option value="none">No filter</option>
+                  <option value="email">Email</option>
+                  <option value="website">Website</option>
+                  <option value="phone">Phone</option>
                 </select>
               </div>
             </div>
@@ -142,9 +178,11 @@ function SearchModal({ onClose }: { onClose: () => void }) {
               Cancel
             </button>
             <button
-              onClick={onClose}
-              className="rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600"
+              onClick={handleSubmit}
+              disabled={createSearch.isPending}
+              className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:opacity-50"
             >
+              {createSearch.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
               Search
             </button>
           </div>

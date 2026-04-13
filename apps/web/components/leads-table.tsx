@@ -13,24 +13,53 @@ import {
   Download,
   Trash2,
   Tag,
+  Loader2,
 } from "lucide-react";
 import { LeadDetail } from "./lead-detail";
+import { trpc } from "../lib/trpc/client";
+import { SEED_LEADS } from "@recon/outreach/seed-data";
 
-// Mock data — will be replaced with tRPC query
-const MOCK_LEADS = [
-  { id: "1", name: "Active Ability Support", category: "NDIS Provider", suburb: "Footscray", state: "VIC", postcode: "3011", rating: "4.2", reviewCount: 47, email: "info@activeability.com.au", phone: "03 9012 3456", website: "activeability.com.au", status: "new" as const, score: "hot" as const, lat: -37.800, lng: 144.899, painPoints: ["Slow response times mentioned in 3 reviews", "Communication gaps with families"] },
-  { id: "2", name: "Sunshine Physiotherapy", category: "Physiotherapist", suburb: "Sunshine", state: "VIC", postcode: "3020", rating: "4.7", reviewCount: 123, email: "admin@sunshinephysio.com.au", phone: "03 9311 2200", website: "sunshinephysio.com.au", status: "qualified" as const, score: "warm" as const, lat: -37.788, lng: 144.833, painPoints: ["Parking difficulties noted", "Wait times for appointments"] },
-  { id: "3", name: "Western Disability Services", category: "NDIS Provider", suburb: "Werribee", state: "VIC", postcode: "3030", rating: "3.8", reviewCount: 31, email: null, phone: "03 9741 0001", website: null, status: "new" as const, score: "hot" as const, lat: -37.899, lng: 144.661, painPoints: ["No website presence", "Invoicing delays mentioned twice", "Staff turnover concerns"] },
-  { id: "4", name: "CareConnect Allied Health", category: "Allied Health", suburb: "Melton", state: "VIC", postcode: "3337", rating: "4.5", reviewCount: 89, email: "hello@careconnect.com.au", phone: "03 9747 8800", website: "careconnect.com.au", status: "contacted" as const, score: "warm" as const, lat: -37.683, lng: 144.578, painPoints: ["Limited weekend availability", "Booking system outdated"] },
-  { id: "5", name: "Bayside Support Coordination", category: "Support Coordinator", suburb: "Brighton", state: "VIC", postcode: "3186", rating: "4.9", reviewCount: 67, email: "team@baysidesupport.com.au", phone: "03 9596 1100", website: "baysidesupport.com.au", status: "proposal" as const, score: "hot" as const, lat: -37.906, lng: 144.987, painPoints: ["Growing fast, may need better systems"] },
-  { id: "6", name: "Northern Community Care", category: "NDIS Provider", suburb: "Reservoir", state: "VIC", postcode: "3073", rating: "3.5", reviewCount: 22, email: "admin@northerncc.org.au", phone: "03 9460 5500", website: "northerncc.org.au", status: "new" as const, score: "cold" as const, lat: -37.717, lng: 145.007, painPoints: ["Poor Google presence", "Only 22 reviews despite years operating"] },
-  { id: "7", name: "Yarra Valley OT", category: "Occupational Therapist", suburb: "Lilydale", state: "VIC", postcode: "3140", rating: "4.8", reviewCount: 156, email: "bookings@yarravalleyot.com.au", phone: "03 9735 2000", website: "yarravalleyot.com.au", status: "new" as const, score: "unscored" as const, lat: -37.756, lng: 145.354, painPoints: [] },
-  { id: "8", name: "Peninsula Plan Management", category: "Plan Manager", suburb: "Frankston", state: "VIC", postcode: "3199", rating: "4.1", reviewCount: 38, email: "plans@peninsulapm.com.au", phone: "03 9783 9000", website: "peninsulapm.com.au", status: "new" as const, score: "warm" as const, lat: -38.143, lng: 145.126, painPoints: ["Invoice processing delays", "Participant portal is confusing"] },
-  { id: "9", name: "Dandenong Ranges Therapy", category: "Allied Health", suburb: "Belgrave", state: "VIC", postcode: "3160", rating: "4.6", reviewCount: 71, email: null, phone: "03 9754 1200", website: "drtherapy.com.au", status: "new" as const, score: "unscored" as const, lat: -37.909, lng: 145.354, painPoints: ["No email found on website"] },
-  { id: "10", name: "Geelong Disability Network", category: "NDIS Provider", suburb: "Geelong", state: "VIC", postcode: "3220", rating: "3.9", reviewCount: 55, email: "contact@gdnetwork.com.au", phone: "03 5222 4000", website: "gdnetwork.com.au", status: "rejected" as const, score: "cold" as const, lat: -38.147, lng: 144.361, painPoints: ["Multiple complaints about billing", "Staff not returning calls"] },
-];
+/** Normalised lead shape used by the table */
+interface TableLead {
+  id: string;
+  name: string;
+  category: string;
+  suburb: string;
+  state: string;
+  postcode: string;
+  rating: string;
+  reviewCount: number;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  status: "new" | "qualified" | "contacted" | "proposal" | "converted" | "rejected";
+  score: "hot" | "warm" | "cold" | "unscored";
+  lat: number;
+  lng: number;
+  painPoints: string[];
+}
 
-type MockLead = (typeof MOCK_LEADS)[number];
+function toTableLeads(raw: Array<Record<string, any>>): TableLead[] {
+  return raw.map((l) => ({
+    id: l.id ?? crypto.randomUUID(),
+    name: l.name ?? "",
+    category: l.category ?? "",
+    suburb: l.suburb ?? "",
+    state: l.state ?? "",
+    postcode: l.postcode ?? "",
+    rating: String(l.rating ?? "0"),
+    reviewCount: l.reviewCount ?? 0,
+    email: l.email ?? null,
+    phone: l.phone ?? null,
+    website: l.website ?? null,
+    status: l.status ?? "new",
+    score: l.score ?? "unscored",
+    lat: Number(l.lat ?? 0),
+    lng: Number(l.lng ?? 0),
+    painPoints: l.painPoints ?? [],
+  }));
+}
+
 type SortField = "name" | "rating" | "reviewCount" | "score" | "status";
 type SortDir = "asc" | "desc";
 
@@ -51,13 +80,24 @@ const SCORE_CONFIG = {
 };
 
 export function LeadsTable() {
-  const [selectedLead, setSelectedLead] = useState<MockLead | null>(null);
+  const [selectedLead, setSelectedLead] = useState<TableLead | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [scoreFilter, setScoreFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("score");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Fetch leads from tRPC
+  const { data: rawLeads, isLoading } = trpc.outreach.leads.list.useQuery(
+    { limit: 100 },
+    { retry: false },
+  );
+
+  // Use tRPC data if available, fall back to seed data
+  const allLeads = toTableLeads(
+    rawLeads && rawLeads.length > 0 ? rawLeads : [...SEED_LEADS],
+  );
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -69,7 +109,7 @@ export function LeadsTable() {
   };
 
   const filteredLeads = useMemo(() => {
-    let result = [...MOCK_LEADS];
+    let result = [...allLeads];
 
     if (statusFilter !== "all")
       result = result.filter((l) => l.status === statusFilter);
@@ -110,7 +150,7 @@ export function LeadsTable() {
     });
 
     return result;
-  }, [statusFilter, scoreFilter, searchQuery, sortField, sortDir]);
+  }, [allLeads, statusFilter, scoreFilter, searchQuery, sortField, sortDir]);
 
   const toggleSelectAll = () => {
     if (selectedIds.size === filteredLeads.length) {
@@ -193,7 +233,11 @@ export function LeadsTable() {
           )}
 
           <span className="ml-auto text-xs text-slate-400">
-            {filteredLeads.length} of {MOCK_LEADS.length} leads
+            {isLoading ? (
+              <Loader2 className="inline h-3 w-3 animate-spin" />
+            ) : (
+              <>{filteredLeads.length} of {allLeads.length} leads</>
+            )}
           </span>
         </div>
 
@@ -247,7 +291,7 @@ export function LeadsTable() {
               </tr>
             </thead>
             <tbody>
-              {filteredLeads.map((lead, i) => {
+              {filteredLeads.map((lead) => {
                 const st = STATUS_CONFIG[lead.status];
                 const sc = SCORE_CONFIG[lead.score];
                 const isSelected = selectedLead?.id === lead.id;

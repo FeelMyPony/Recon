@@ -2,23 +2,9 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { LeadDetail } from "./lead-detail";
-import { Filter, Search, Layers, ZoomIn, ZoomOut } from "lucide-react";
-
-// Mock data — will be replaced with tRPC query
-const MOCK_LEADS = [
-  { id: "1", name: "Active Ability Support", category: "NDIS Provider", suburb: "Footscray", state: "VIC", postcode: "3011", rating: "4.2", reviewCount: 47, email: "info@activeability.com.au", phone: "03 9012 3456", website: "activeability.com.au", status: "new" as const, score: "hot" as const, lat: -37.800, lng: 144.899, painPoints: ["Slow response times mentioned in 3 reviews", "Communication gaps with families"] },
-  { id: "2", name: "Sunshine Physiotherapy", category: "Physiotherapist", suburb: "Sunshine", state: "VIC", postcode: "3020", rating: "4.7", reviewCount: 123, email: "admin@sunshinephysio.com.au", phone: "03 9311 2200", website: "sunshinephysio.com.au", status: "qualified" as const, score: "warm" as const, lat: -37.788, lng: 144.833, painPoints: ["Parking difficulties noted", "Wait times for appointments"] },
-  { id: "3", name: "Western Disability Services", category: "NDIS Provider", suburb: "Werribee", state: "VIC", postcode: "3030", rating: "3.8", reviewCount: 31, email: null, phone: "03 9741 0001", website: null, status: "new" as const, score: "hot" as const, lat: -37.899, lng: 144.661, painPoints: ["No website presence", "Invoicing delays mentioned twice", "Staff turnover concerns"] },
-  { id: "4", name: "CareConnect Allied Health", category: "Allied Health", suburb: "Melton", state: "VIC", postcode: "3337", rating: "4.5", reviewCount: 89, email: "hello@careconnect.com.au", phone: "03 9747 8800", website: "careconnect.com.au", status: "contacted" as const, score: "warm" as const, lat: -37.683, lng: 144.578, painPoints: ["Limited weekend availability", "Booking system outdated"] },
-  { id: "5", name: "Bayside Support Coordination", category: "Support Coordinator", suburb: "Brighton", state: "VIC", postcode: "3186", rating: "4.9", reviewCount: 67, email: "team@baysidesupport.com.au", phone: "03 9596 1100", website: "baysidesupport.com.au", status: "proposal" as const, score: "hot" as const, lat: -37.906, lng: 144.987, painPoints: ["Growing fast, may need better systems"] },
-  { id: "6", name: "Northern Community Care", category: "NDIS Provider", suburb: "Reservoir", state: "VIC", postcode: "3073", rating: "3.5", reviewCount: 22, email: "admin@northerncc.org.au", phone: "03 9460 5500", website: "northerncc.org.au", status: "new" as const, score: "cold" as const, lat: -37.717, lng: 145.007, painPoints: ["Poor Google presence", "Only 22 reviews despite years operating"] },
-  { id: "7", name: "Yarra Valley OT", category: "Occupational Therapist", suburb: "Lilydale", state: "VIC", postcode: "3140", rating: "4.8", reviewCount: 156, email: "bookings@yarravalleyot.com.au", phone: "03 9735 2000", website: "yarravalleyot.com.au", status: "new" as const, score: "unscored" as const, lat: -37.756, lng: 145.354, painPoints: [] },
-  { id: "8", name: "Peninsula Plan Management", category: "Plan Manager", suburb: "Frankston", state: "VIC", postcode: "3199", rating: "4.1", reviewCount: 38, email: "plans@peninsulapm.com.au", phone: "03 9783 9000", website: "peninsulapm.com.au", status: "new" as const, score: "warm" as const, lat: -38.143, lng: 145.126, painPoints: ["Invoice processing delays", "Participant portal is confusing"] },
-  { id: "9", name: "Dandenong Ranges Therapy", category: "Allied Health", suburb: "Belgrave", state: "VIC", postcode: "3160", rating: "4.6", reviewCount: 71, email: null, phone: "03 9754 1200", website: "drtherapy.com.au", status: "new" as const, score: "unscored" as const, lat: -37.909, lng: 145.354, painPoints: ["No email found on website"] },
-  { id: "10", name: "Geelong Disability Network", category: "NDIS Provider", suburb: "Geelong", state: "VIC", postcode: "3220", rating: "3.9", reviewCount: 55, email: "contact@gdnetwork.com.au", phone: "03 5222 4000", website: "gdnetwork.com.au", status: "rejected" as const, score: "cold" as const, lat: -38.147, lng: 144.361, painPoints: ["Multiple complaints about billing", "Staff not returning calls"] },
-];
-
-type MockLead = (typeof MOCK_LEADS)[number];
+import { Filter, Search, Layers, ZoomIn, ZoomOut, Loader2, MapPin, X } from "lucide-react";
+import { trpc } from "../lib/trpc/client";
+import { SEED_LEADS } from "@recon/outreach/seed-data";
 
 const SCORE_COLORS: Record<string, string> = {
   hot: "#ef4444",
@@ -30,16 +16,88 @@ const SCORE_COLORS: Record<string, string> = {
 // Mapbox dark style that matches our brand
 const MAPBOX_DARK_STYLE = "mapbox://styles/mapbox/dark-v11";
 
+/** Normalised lead shape used by the map */
+interface MapLead {
+  id: string;
+  name: string;
+  category: string;
+  suburb: string;
+  state: string;
+  postcode: string;
+  rating: string;
+  reviewCount: number;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  status: "new" | "qualified" | "contacted" | "proposal" | "converted" | "rejected";
+  score: "hot" | "warm" | "cold" | "unscored";
+  lat: number;
+  lng: number;
+  painPoints: string[];
+}
+
+function toMapLeads(
+  raw: Array<Record<string, any>>,
+): MapLead[] {
+  return raw
+    .filter((l) => l.lat != null && l.lng != null)
+    .map((l) => ({
+      id: l.id ?? crypto.randomUUID(),
+      name: l.name ?? "",
+      category: l.category ?? "",
+      suburb: l.suburb ?? "",
+      state: l.state ?? "",
+      postcode: l.postcode ?? "",
+      rating: String(l.rating ?? "0"),
+      reviewCount: l.reviewCount ?? 0,
+      email: l.email ?? null,
+      phone: l.phone ?? null,
+      website: l.website ?? null,
+      status: l.status ?? "new",
+      score: l.score ?? "unscored",
+      lat: Number(l.lat),
+      lng: Number(l.lng),
+      painPoints: l.painPoints ?? [],
+    }));
+}
+
 export function MapView() {
-  const [selectedLead, setSelectedLead] = useState<MockLead | null>(null);
+  const [selectedLead, setSelectedLead] = useState<MapLead | null>(null);
   const [statusFilter, setStatusFilter] = useState("all");
   const [scoreFilter, setScoreFilter] = useState("all");
   const [mapLoaded, setMapLoaded] = useState(false);
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
-  const markersRef = useRef<any[]>([]);
 
-  const filteredLeads = MOCK_LEADS.filter((lead) => {
+  // Radius search state
+  const [radiusMode, setRadiusMode] = useState(false);
+  const [radiusCentre, setRadiusCentre] = useState<{ lat: number; lng: number } | null>(null);
+  const [radiusKm, setRadiusKm] = useState(10);
+
+  // Fetch leads from tRPC (standard list)
+  const { data: rawLeads, isLoading } = trpc.outreach.leads.list.useQuery(
+    { limit: 100 },
+    { retry: false, enabled: !radiusCentre },
+  );
+
+  // Fetch nearby leads when radius search is active
+  const { data: nearbyLeads, isLoading: isLoadingNearby } = trpc.outreach.leads.nearby.useQuery(
+    {
+      lat: radiusCentre?.lat ?? 0,
+      lng: radiusCentre?.lng ?? 0,
+      radiusKm,
+      limit: 200,
+    },
+    { retry: false, enabled: !!radiusCentre },
+  );
+
+  // Use nearby query when radius is set, otherwise standard list
+  const activeData = radiusCentre ? nearbyLeads : rawLeads;
+  const allLeads = toMapLeads(
+    activeData && activeData.length > 0 ? activeData : [...SEED_LEADS],
+  );
+
+  const filteredLeads = allLeads.filter((lead) => {
     if (statusFilter !== "all" && lead.status !== statusFilter) return false;
     if (scoreFilter !== "all" && lead.score !== scoreFilter) return false;
     return true;
@@ -78,6 +136,142 @@ export function MapView() {
         if (!cancelled) {
           mapRef.current = map;
           setMapLoaded(true);
+
+          // ── Leads GeoJSON source with clustering ──
+          map.addSource("leads", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features: [] },
+            cluster: true,
+            clusterMaxZoom: 14,
+            clusterRadius: 50,
+          });
+
+          // Cluster circles
+          map.addLayer({
+            id: "clusters",
+            type: "circle",
+            source: "leads",
+            filter: ["has", "point_count"],
+            paint: {
+              "circle-color": [
+                "step",
+                ["get", "point_count"],
+                "#00BFA6", // teal for small clusters
+                10,
+                "#f59e0b", // amber for medium
+                50,
+                "#ef4444", // red for large
+              ],
+              "circle-radius": [
+                "step",
+                ["get", "point_count"],
+                16, 10, 22, 50, 30,
+              ],
+              "circle-opacity": 0.85,
+              "circle-stroke-width": 2,
+              "circle-stroke-color": "rgba(255,255,255,0.15)",
+            },
+          });
+
+          // Cluster count labels
+          map.addLayer({
+            id: "cluster-count",
+            type: "symbol",
+            source: "leads",
+            filter: ["has", "point_count"],
+            layout: {
+              "text-field": ["get", "point_count_abbreviated"],
+              "text-font": ["DIN Pro Medium", "Arial Unicode MS Bold"],
+              "text-size": 12,
+            },
+            paint: {
+              "text-color": "#ffffff",
+            },
+          });
+
+          // Individual unclustered lead points
+          map.addLayer({
+            id: "unclustered-point",
+            type: "circle",
+            source: "leads",
+            filter: ["!", ["has", "point_count"]],
+            paint: {
+              "circle-color": [
+                "match",
+                ["get", "score"],
+                "hot", "#ef4444",
+                "warm", "#f59e0b",
+                "cold", "#60a5fa",
+                "#94a3b8", // unscored default
+              ],
+              "circle-radius": 7,
+              "circle-stroke-width": 2,
+              "circle-stroke-color": [
+                "match",
+                ["get", "score"],
+                "hot", "rgba(239,68,68,0.3)",
+                "warm", "rgba(245,158,11,0.3)",
+                "cold", "rgba(96,165,250,0.3)",
+                "rgba(148,163,184,0.3)",
+              ],
+            },
+          });
+
+          // ── Cluster click: zoom into cluster ──
+          map.on("click", "clusters", (e: any) => {
+            const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
+            const feature = features?.[0];
+            if (!feature?.properties) return;
+            const clusterId = feature.properties.cluster_id;
+            const coords = (feature.geometry as any).coordinates as [number, number];
+            (map.getSource("leads") as any).getClusterExpansionZoom(
+              clusterId,
+              (err: any, zoom: number) => {
+                if (err) return;
+                map.easeTo({ center: coords, zoom });
+              },
+            );
+          });
+
+          // ── Point click: select lead ──
+          map.on("click", "unclustered-point", (e: any) => {
+            if (!e.features?.length) return;
+            const props = e.features[0].properties;
+            // Store lead ID so the effect can pick it up
+            const detail = new CustomEvent("recon:select-lead", { detail: props.id });
+            window.dispatchEvent(detail);
+          });
+
+          // Cursor changes
+          map.on("mouseenter", "clusters", () => { map.getCanvas().style.cursor = "pointer"; });
+          map.on("mouseleave", "clusters", () => { map.getCanvas().style.cursor = ""; });
+          map.on("mouseenter", "unclustered-point", () => { map.getCanvas().style.cursor = "pointer"; });
+          map.on("mouseleave", "unclustered-point", () => { map.getCanvas().style.cursor = ""; });
+
+          // Add an empty GeoJSON source for the radius circle
+          map.addSource("radius-circle", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features: [] },
+          });
+          map.addLayer({
+            id: "radius-circle-fill",
+            type: "fill",
+            source: "radius-circle",
+            paint: {
+              "fill-color": "#00BFA6",
+              "fill-opacity": 0.08,
+            },
+          });
+          map.addLayer({
+            id: "radius-circle-stroke",
+            type: "line",
+            source: "radius-circle",
+            paint: {
+              "line-color": "#00BFA6",
+              "line-width": 1.5,
+              "line-opacity": 0.4,
+            },
+          });
         }
       });
     }
@@ -93,65 +287,107 @@ export function MapView() {
     };
   }, [hasMapboxToken]);
 
-  // Update markers when leads or filters change
+  // Update GeoJSON source when leads or filters change (clustering handled by Mapbox)
+  useEffect(() => {
+    if (!mapRef.current || !mapLoaded) return;
+    const source = mapRef.current.getSource("leads");
+    if (!source) return;
+
+    const geojson = {
+      type: "FeatureCollection" as const,
+      features: filteredLeads.map((lead) => ({
+        type: "Feature" as const,
+        geometry: {
+          type: "Point" as const,
+          coordinates: [lead.lng, lead.lat],
+        },
+        properties: {
+          id: lead.id,
+          name: lead.name,
+          category: lead.category,
+          suburb: lead.suburb,
+          rating: lead.rating,
+          reviewCount: lead.reviewCount,
+          score: lead.score,
+          status: lead.status,
+        },
+      })),
+    };
+
+    source.setData(geojson);
+  }, [filteredLeads, mapLoaded]);
+
+  // Listen for lead selection from the map click handler
+  useEffect(() => {
+    function handleSelect(e: Event) {
+      const leadId = (e as CustomEvent).detail;
+      const lead = filteredLeads.find((l) => l.id === leadId);
+      if (lead) setSelectedLead(lead);
+    }
+    window.addEventListener("recon:select-lead", handleSelect);
+    return () => window.removeEventListener("recon:select-lead", handleSelect);
+  }, [filteredLeads]);
+
+  // Handle map click in radius mode
   useEffect(() => {
     if (!mapRef.current || !mapLoaded) return;
 
-    // Clear existing markers
-    markersRef.current.forEach((m) => m.remove());
-    markersRef.current = [];
+    function handleClick(e: any) {
+      if (!radiusMode) return;
+      setRadiusCentre({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+      setRadiusMode(false); // exit placement mode after click
+    }
 
-    const mapboxgl = require("mapbox-gl");
+    mapRef.current.on("click", handleClick);
+    // Change cursor in radius mode
+    if (radiusMode) {
+      mapRef.current.getCanvas().style.cursor = "crosshair";
+    } else {
+      mapRef.current.getCanvas().style.cursor = "";
+    }
 
-    filteredLeads.forEach((lead) => {
-      const color = SCORE_COLORS[lead.score] ?? "#94a3b8";
-      const isSelected = selectedLead?.id === lead.id;
-      const size = isSelected ? 18 : 12;
+    return () => {
+      mapRef.current?.off("click", handleClick);
+    };
+  }, [radiusMode, mapLoaded]);
 
-      // Create custom marker element
-      const el = document.createElement("div");
-      el.className = "recon-marker";
-      el.style.cssText = `
-        width: ${size}px;
-        height: ${size}px;
-        background: ${color};
-        border: 2px solid ${isSelected ? "#fff" : color + "60"};
-        border-radius: 50%;
-        cursor: pointer;
-        box-shadow: 0 0 ${isSelected ? 12 : 6}px ${color}80;
-        transition: all 0.2s ease;
-      `;
+  // Draw radius circle on map
+  useEffect(() => {
+    if (!mapRef.current || !mapLoaded) return;
+    const source = mapRef.current.getSource("radius-circle");
+    if (!source) return;
 
-      el.addEventListener("mouseenter", () => {
-        el.style.transform = "scale(1.3)";
-      });
-      el.addEventListener("mouseleave", () => {
-        el.style.transform = "scale(1)";
-      });
-      el.addEventListener("click", () => {
-        setSelectedLead(lead);
-      });
+    if (!radiusCentre) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
 
-      const marker = new mapboxgl.Marker({ element: el })
-        .setLngLat([lead.lng, lead.lat])
-        .setPopup(
-          new mapboxgl.Popup({
-            offset: 15,
-            closeButton: false,
-            className: "recon-popup",
-          }).setHTML(`
-            <div style="font-family: Inter, system-ui; padding: 2px 0;">
-              <div style="font-weight: 600; font-size: 12px; color: #0F1B2D;">${lead.name}</div>
-              <div style="font-size: 11px; color: #64748B; margin-top: 2px;">${lead.category} · ${lead.suburb}</div>
-              <div style="font-size: 11px; color: #f59e0b; margin-top: 2px;">★ ${lead.rating} (${lead.reviewCount})</div>
-            </div>
-          `),
-        )
-        .addTo(mapRef.current!);
+    // Generate a circle polygon (64 points)
+    const steps = 64;
+    const coords: [number, number][] = [];
+    const earthRadiusKm = 6371;
+    for (let i = 0; i <= steps; i++) {
+      const angle = (i / steps) * 2 * Math.PI;
+      const dLat = (radiusKm / earthRadiusKm) * (180 / Math.PI);
+      const dLng =
+        dLat / Math.cos((radiusCentre.lat * Math.PI) / 180);
+      coords.push([
+        radiusCentre.lng + dLng * Math.cos(angle),
+        radiusCentre.lat + dLat * Math.sin(angle),
+      ]);
+    }
 
-      markersRef.current.push(marker);
+    source.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "Polygon", coordinates: [coords] },
+          properties: {},
+        },
+      ],
     });
-  }, [filteredLeads, selectedLead, mapLoaded]);
+  }, [radiusCentre, radiusKm, mapLoaded]);
 
   // Fly to selected lead
   useEffect(() => {
@@ -197,12 +433,59 @@ export function MapView() {
           </div>
         </div>
 
-        {/* Lead count badge */}
-        <div className="absolute right-3 top-3 z-10 rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
-          <span className="font-mono text-xs text-brand-teal">
-            {filteredLeads.length}
-          </span>
-          <span className="ml-1 text-xs text-slate-400">leads</span>
+        {/* Radius search controls */}
+        <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
+          {/* Lead count badge */}
+          <div className="rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
+            <span className="font-mono text-xs text-brand-teal">
+              {filteredLeads.length}
+            </span>
+            <span className="ml-1 text-xs text-slate-400">leads</span>
+            {(isLoading || isLoadingNearby) && (
+              <Loader2 className="ml-1.5 inline h-3 w-3 animate-spin text-brand-teal" />
+            )}
+          </div>
+
+          {/* Radius search toggle */}
+          {!radiusCentre ? (
+            <button
+              onClick={() => setRadiusMode(!radiusMode)}
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs backdrop-blur-sm transition-colors ${
+                radiusMode
+                  ? "border-brand-teal/50 bg-brand-teal/20 text-brand-teal"
+                  : "border-white/10 bg-brand-navy-900/80 text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <MapPin className="h-3.5 w-3.5" />
+              {radiusMode ? "Click map to set centre" : "Radius search"}
+            </button>
+          ) : (
+            <div className="flex flex-col gap-1.5 rounded-lg border border-brand-teal/30 bg-brand-navy-900/80 px-3 py-2 backdrop-blur-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] uppercase tracking-wider text-brand-teal">Radius</span>
+                <button
+                  onClick={() => {
+                    setRadiusCentre(null);
+                    setRadiusMode(false);
+                  }}
+                  className="text-slate-400 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={1}
+                  max={50}
+                  value={radiusKm}
+                  onChange={(e) => setRadiusKm(Number(e.target.value))}
+                  className="h-1 w-24 accent-brand-teal"
+                />
+                <span className="font-mono text-xs text-slate-300">{radiusKm}km</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Score legend */}
@@ -250,9 +533,9 @@ function FallbackMap({
   selectedId,
   onSelectLead,
 }: {
-  leads: MockLead[];
+  leads: MapLead[];
   selectedId: string | null;
-  onSelectLead: (lead: MockLead) => void;
+  onSelectLead: (lead: MapLead) => void;
 }) {
   const toXY = (lat: number, lng: number) => {
     const x = ((lng - 144.0) / (145.5 - 144.0)) * 100;

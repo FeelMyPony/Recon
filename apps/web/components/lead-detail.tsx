@@ -36,7 +36,7 @@ interface Lead {
   rating: string;
   reviewCount: number;
   email: string | null;
-  phone: string;
+  phone: string | null;
   website: string | null;
   status: keyof typeof STATUS_CONFIG;
   score: keyof typeof SCORE_CONFIG;
@@ -127,10 +127,12 @@ export function LeadDetail({
               <span className="text-brand-navy-900">{lead.email}</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-sm">
-            <Phone className="h-3.5 w-3.5 text-slate-500" />
-            <span className="text-brand-navy-900">{lead.phone}</span>
-          </div>
+          {lead.phone && (
+            <div className="flex items-center gap-2 text-sm">
+              <Phone className="h-3.5 w-3.5 text-slate-500" />
+              <span className="text-brand-navy-900">{lead.phone}</span>
+            </div>
+          )}
           {lead.website && (
             <div className="flex items-center gap-2 text-sm">
               <Globe className="h-3.5 w-3.5 text-slate-500" />

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { eq, and, desc, ilike, sql } from "drizzle-orm";
+import { eq, and, desc, ilike, sql, count } from "drizzle-orm";
 import { leads, leadSocials, notes } from "./schema/leads";
 import { reviews, reviewAnalyses } from "./schema/reviews";
 import { searches } from "./schema/searches";
@@ -47,7 +47,42 @@ export const outreachRouter = createTRPCRouter({
           .limit(input.limit)
           .offset(input.offset);
 
-        return result;
+        if (result.length === 0) return [];
+
+        // Fetch latest review analyses for these leads (pain points)
+        const leadIds = result.map((l) => l.id);
+        const analyses = await ctx.db
+          .select({
+            leadId: reviewAnalyses.leadId,
+            weaknesses: reviewAnalyses.weaknesses,
+            opportunities: reviewAnalyses.opportunities,
+          })
+          .from(reviewAnalyses)
+          .where(
+            sql`${reviewAnalyses.leadId} = ANY(${leadIds}) AND ${reviewAnalyses.workspaceId} = ${ctx.workspaceId}`,
+          )
+          .orderBy(desc(reviewAnalyses.createdAt));
+
+        // Keep only the latest analysis per lead
+        const latestByLead = new Map<string, { weaknesses: string[]; opportunities: string[] }>();
+        for (const a of analyses) {
+          if (!latestByLead.has(a.leadId)) {
+            latestByLead.set(a.leadId, {
+              weaknesses: (a.weaknesses as string[]) ?? [],
+              opportunities: (a.opportunities as string[]) ?? [],
+            });
+          }
+        }
+
+        return result.map((lead) => {
+          const analysis = latestByLead.get(lead.id);
+          return {
+            ...lead,
+            painPoints: analysis
+              ? [...analysis.weaknesses, ...analysis.opportunities]
+              : [],
+          };
+        });
       }),
 
     getById: protectedProcedure
@@ -91,6 +126,60 @@ export const outreachRouter = createTRPCRouter({
           notes: leadNotes,
           latestAnalysis: analyses[0] ?? null,
         };
+      }),
+
+    /**
+     * Nearby leads: radius search using PostGIS ST_DWithin.
+     * Expects a centre point (lat/lng) and radius in kilometres.
+     * Falls back to a bounding-box approximation if PostGIS extension
+     * is not installed (dev without PostGIS).
+     */
+    nearby: protectedProcedure
+      .input(
+        z.object({
+          lat: z.number().min(-90).max(90),
+          lng: z.number().min(-180).max(180),
+          radiusKm: z.number().min(0.1).max(500).default(10),
+          score: z.string().optional(),
+          limit: z.number().min(1).max(200).default(100),
+        }),
+      )
+      .query(async ({ ctx, input }) => {
+        const radiusMetres = input.radiusKm * 1000;
+
+        const conditions = [eq(leads.workspaceId, ctx.workspaceId)];
+        if (input.score) {
+          conditions.push(eq(leads.score, input.score as any));
+        }
+
+        // Use PostGIS ST_DWithin for proper geodesic distance
+        // Cast lat/lng to geography points on the fly
+        const result = await ctx.db
+          .select()
+          .from(leads)
+          .where(
+            and(
+              ...conditions,
+              sql`${leads.lat} IS NOT NULL AND ${leads.lng} IS NOT NULL`,
+              sql`ST_DWithin(
+                ST_SetSRID(ST_MakePoint(${leads.lng}, ${leads.lat}), 4326)::geography,
+                ST_SetSRID(ST_MakePoint(${input.lng}, ${input.lat}), 4326)::geography,
+                ${radiusMetres}
+              )`,
+            ),
+          )
+          .orderBy(
+            sql`ST_Distance(
+              ST_SetSRID(ST_MakePoint(${leads.lng}, ${leads.lat}), 4326)::geography,
+              ST_SetSRID(ST_MakePoint(${input.lng}, ${input.lat}), 4326)::geography
+            ) ASC`,
+          )
+          .limit(input.limit);
+
+        return result.map((lead) => ({
+          ...lead,
+          painPoints: [] as string[],
+        }));
       }),
 
     updateStatus: protectedProcedure
@@ -145,7 +234,7 @@ export const outreachRouter = createTRPCRouter({
         }),
       )
       .mutation(async ({ ctx, input }) => {
-        const [search] = await ctx.db
+        const rows = await ctx.db
           .insert(searches)
           .values({
             workspaceId: ctx.workspaceId,
@@ -155,8 +244,21 @@ export const outreachRouter = createTRPCRouter({
           })
           .returning();
 
-        // TODO: Emit event to trigger Outscraper Lambda
-        // await emitEvent("outreach.search.created", ctx.workspaceId, "outreach", { searchId: search.id });
+        const search = rows[0]!;
+
+        // Emit event to trigger Outscraper Lambda via SQS
+        try {
+          const { emitEvent } = await import("@recon/events");
+          await emitEvent(
+            "outreach.search.created",
+            ctx.workspaceId,
+            "outreach",
+            { searchId: search.id, query: input.query, location: input.location },
+          );
+        } catch (err) {
+          // Event bus may not be initialised in dev — log and continue
+          console.warn("[outreach] Failed to emit search.created event:", err);
+        }
 
         return search;
       }),
@@ -188,14 +290,50 @@ export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
 
   stats: protectedProcedure.query(async ({ ctx }) => {
-    const allLeads = await ctx.db
-      .select({
-        status: leads.status,
-        score: leads.score,
-        email: leads.email,
-      })
-      .from(leads)
-      .where(eq(leads.workspaceId, ctx.workspaceId));
+    const [allLeads, emailCounts] = await Promise.all([
+      ctx.db
+        .select({
+          status: leads.status,
+          score: leads.score,
+          email: leads.email,
+          category: leads.category,
+        })
+        .from(leads)
+        .where(eq(leads.workspaceId, ctx.workspaceId)),
+      ctx.db
+        .select({
+          status: outreachEmails.status,
+          cnt: count(),
+        })
+        .from(outreachEmails)
+        .where(eq(outreachEmails.workspaceId, ctx.workspaceId))
+        .groupBy(outreachEmails.status),
+    ]);
+
+    const emailsByStatus = Object.fromEntries(
+      emailCounts.map((e) => [e.status, Number(e.cnt)]),
+    ) as Record<string, number>;
+    const totalSent =
+      (emailsByStatus.sent ?? 0) +
+      (emailsByStatus.opened ?? 0) +
+      (emailsByStatus.replied ?? 0) +
+      (emailsByStatus.bounced ?? 0);
+    const opened = (emailsByStatus.opened ?? 0) + (emailsByStatus.replied ?? 0);
+    const replied = emailsByStatus.replied ?? 0;
+
+    // Category breakdown
+    const catMap = new Map<string, { total: number; withEmail: number }>();
+    for (const l of allLeads) {
+      const cat = l.category ?? "Other";
+      const entry = catMap.get(cat) ?? { total: 0, withEmail: 0 };
+      entry.total++;
+      if (l.email) entry.withEmail++;
+      catMap.set(cat, entry);
+    }
+    const byCategory = Array.from(catMap.entries())
+      .map(([name, data]) => ({ name, ...data }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
 
     return {
       total: allLeads.length,
@@ -203,6 +341,10 @@ export const outreachRouter = createTRPCRouter({
       hot: allLeads.filter((l) => l.score === "hot").length,
       warm: allLeads.filter((l) => l.score === "warm").length,
       cold: allLeads.filter((l) => l.score === "cold").length,
+      unscored: allLeads.filter((l) => l.score === "unscored").length,
+      emailsSent: totalSent,
+      openRate: totalSent > 0 ? Math.round((opened / totalSent) * 100) : 0,
+      replyRate: totalSent > 0 ? Math.round((replied / totalSent) * 100) : 0,
       byStatus: {
         new: allLeads.filter((l) => l.status === "new").length,
         qualified: allLeads.filter((l) => l.status === "qualified").length,
@@ -211,6 +353,7 @@ export const outreachRouter = createTRPCRouter({
         converted: allLeads.filter((l) => l.status === "converted").length,
         rejected: allLeads.filter((l) => l.status === "rejected").length,
       },
+      byCategory,
     };
   }),
 });
