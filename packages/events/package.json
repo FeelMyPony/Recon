@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
-    "./types": "./types.ts"
+    "./types": "./types.ts",
+    "./sns": "./sns.ts"
   },
   "dependencies": {
     "@recon/logger": "workspace:*"

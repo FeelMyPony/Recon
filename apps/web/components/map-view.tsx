@@ -1,617 +1,731 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import { LeadDetail } from "./lead-detail";
-import { Filter, Search, Layers, ZoomIn, ZoomOut, Loader2, MapPin, X } from "lucide-react";
-import { trpc } from "../lib/trpc/client";
-import { SEED_LEADS } from "@recon/outreach/seed-data";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { trpc } from "@/lib/trpc/client";
+import { Loader } from "@googlemaps/js-api-loader";
+import {
+  MarkerClusterer,
+  SuperClusterAlgorithm,
+} from "@googlemaps/markerclusterer";
+import {
+  Circle,
+  Loader2,
+  MapPin,
+  Pencil,
+  Plus,
+  Search,
+  Target,
+  X,
+} from "lucide-react";
+// ─────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────
 
-const SCORE_COLORS: Record<string, string> = {
+type LeadScore = "hot" | "warm" | "cold" | "unscored";
+type LeadStatus =
+  | "new"
+  | "qualified"
+  | "contacted"
+  | "proposal"
+  | "converted"
+  | "rejected";
+
+interface MapLead {
+  id: string;
+  name: string;
+  category: string | null;
+  lat: number;
+  lng: number;
+  status: LeadStatus;
+  score: LeadScore;
+  suburb: string | null;
+  rating: string | null;
+  reviewCount: number | null;
+  email: string | null;
+  phone: string | null;
+}
+
+const SCORE_COLORS: Record<LeadScore, string> = {
   hot: "#ef4444",
   warm: "#f59e0b",
   cold: "#60a5fa",
   unscored: "#94a3b8",
 };
 
-// Mapbox dark style that matches our brand
-const MAPBOX_DARK_STYLE = "mapbox://styles/mapbox/dark-v11";
+const MELBOURNE_CENTER = { lat: -37.814, lng: 144.963 };
 
-/** Normalised lead shape used by the map */
-interface MapLead {
-  id: string;
-  name: string;
-  category: string;
-  suburb: string;
-  state: string;
-  postcode: string;
-  rating: string;
-  reviewCount: number;
-  email: string | null;
-  phone: string | null;
-  website: string | null;
-  status: "new" | "qualified" | "contacted" | "proposal" | "converted" | "rejected";
-  score: "hot" | "warm" | "cold" | "unscored";
-  lat: number;
-  lng: number;
-  painPoints: string[];
+// Dark mode map style (applied when no Map ID is supplied).
+// Navy #0F1B2D base, aligns with RTT brand.
+const DARK_MAP_STYLES: google.maps.MapTypeStyle[] = [
+  { elementType: "geometry", stylers: [{ color: "#0F1B2D" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#0F1B2D" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#8892a8" }] },
+  {
+    featureType: "administrative.locality",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#cbd5e1" }],
+  },
+  {
+    featureType: "poi",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#64748b" }],
+  },
+  {
+    featureType: "poi.park",
+    elementType: "geometry",
+    stylers: [{ color: "#0a1624" }],
+  },
+  {
+    featureType: "road",
+    elementType: "geometry",
+    stylers: [{ color: "#1a2b47" }],
+  },
+  {
+    featureType: "road",
+    elementType: "geometry.stroke",
+    stylers: [{ color: "#0b1628" }],
+  },
+  {
+    featureType: "road.highway",
+    elementType: "geometry",
+    stylers: [{ color: "#243b63" }],
+  },
+  {
+    featureType: "transit",
+    elementType: "geometry",
+    stylers: [{ color: "#14243d" }],
+  },
+  {
+    featureType: "water",
+    elementType: "geometry",
+    stylers: [{ color: "#05101f" }],
+  },
+  {
+    featureType: "water",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#3b82f6" }],
+  },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+function toMapLeads<
+  T extends {
+    id: string;
+    name: string;
+    category: string | null;
+    lat: number | null;
+    lng: number | null;
+    status: LeadStatus | null;
+    score: LeadScore | null;
+    suburb: string | null;
+    rating: string | null;
+    reviewCount: number | null;
+    email: string | null;
+    phone: string | null;
+  },
+>(rows: T[] | undefined): MapLead[] {
+  if (!rows) return [];
+  const out: MapLead[] = [];
+  for (const r of rows) {
+    if (r.lat == null || r.lng == null) continue;
+    out.push({
+      id: r.id,
+      name: r.name,
+      category: r.category,
+      lat: r.lat,
+      lng: r.lng,
+      status: r.status ?? "new",
+      score: r.score ?? "unscored",
+      suburb: r.suburb,
+      rating: r.rating,
+      reviewCount: r.reviewCount,
+      email: r.email,
+      phone: r.phone,
+    });
+  }
+  return out;
 }
 
-function toMapLeads(
-  raw: Array<Record<string, any>>,
-): MapLead[] {
-  return raw
-    .filter((l) => l.lat != null && l.lng != null)
-    .map((l) => ({
-      id: l.id ?? crypto.randomUUID(),
-      name: l.name ?? "",
-      category: l.category ?? "",
-      suburb: l.suburb ?? "",
-      state: l.state ?? "",
-      postcode: l.postcode ?? "",
-      rating: String(l.rating ?? "0"),
-      reviewCount: l.reviewCount ?? 0,
-      email: l.email ?? null,
-      phone: l.phone ?? null,
-      website: l.website ?? null,
-      status: l.status ?? "new",
-      score: l.score ?? "unscored",
-      lat: Number(l.lat),
-      lng: Number(l.lng),
-      painPoints: l.painPoints ?? [],
-    }));
+function buildMarkerIcon(score: LeadScore): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    fillColor: SCORE_COLORS[score],
+    fillOpacity: 1,
+    strokeColor: "#0F1B2D",
+    strokeWeight: 2,
+    scale: 8,
+  };
 }
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function popupHtml(lead: MapLead): string {
+  const rating =
+    lead.rating != null
+      ? `<div style="color:#fbbf24; font-size:12px;">★ ${escapeHtml(
+          String(lead.rating),
+        )}${
+          lead.reviewCount ? " · " + lead.reviewCount + " reviews" : ""
+        }</div>`
+      : "";
+  const contact = lead.email
+    ? `<div style="color:#22d3ee; font-size:11px; margin-top:4px;">${escapeHtml(
+        lead.email,
+      )}</div>`
+    : lead.phone
+    ? `<div style="color:#22d3ee; font-size:11px; margin-top:4px;">${escapeHtml(
+        lead.phone,
+      )}</div>`
+    : "";
+  return `
+    <div style="color:#e2e8f0; font-family: ui-sans-serif, system-ui; min-width:200px;">
+      <div style="font-weight:600; font-size:14px; margin-bottom:2px; color:#fff;">${escapeHtml(
+        lead.name,
+      )}</div>
+      <div style="color:#94a3b8; font-size:12px;">${escapeHtml(
+        lead.category ?? "",
+      )}${lead.suburb ? " · " + escapeHtml(lead.suburb) : ""}</div>
+      ${rating}
+      ${contact}
+      <div style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">
+        <span style="padding:2px 6px; border-radius:9999px; font-size:10px; background:${
+          SCORE_COLORS[lead.score]
+        }22; color:${SCORE_COLORS[lead.score]};">${lead.score}</span>
+        <span style="padding:2px 6px; border-radius:9999px; font-size:10px; background:#1e293b; color:#cbd5e1;">${
+          lead.status
+        }</span>
+      </div>
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fallback when no API key
+// ─────────────────────────────────────────────────────────────────────────
+
+function FallbackMap({ leads }: { leads: MapLead[] }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 bg-slate-900 p-8 text-center">
+      <MapPin className="h-12 w-12 text-slate-500" />
+      <h3 className="text-lg font-semibold text-slate-200">
+        Google Maps API key missing
+      </h3>
+      <p className="max-w-md text-sm text-slate-400">
+        Add{" "}
+        <code className="rounded bg-slate-800 px-1.5 py-0.5 text-teal-400">
+          NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+        </code>{" "}
+        to your environment, enable Maps JavaScript API and Places API in GCP,
+        then redeploy.
+      </p>
+      <p className="text-xs text-slate-500">
+        {leads.length} leads loaded (not displayed without API key).
+      </p>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Main component
+// ─────────────────────────────────────────────────────────────────────────
+
+type DrawMode = "none" | "radius" | "polygon";
 
 export function MapView() {
-  const [selectedLead, setSelectedLead] = useState<MapLead | null>(null);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [scoreFilter, setScoreFilter] = useState("all");
-  const [mapLoaded, setMapLoaded] = useState(false);
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<any>(null);
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const mapId = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID;
 
-  // Radius search state
-  const [radiusMode, setRadiusMode] = useState(false);
-  const [radiusCentre, setRadiusCentre] = useState<{ lat: number; lng: number } | null>(null);
-  const [radiusKm, setRadiusKm] = useState(10);
+  // Refs
+  const mapDivRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const clustererRef = useRef<MarkerClusterer | null>(null);
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+  const circleRef = useRef<google.maps.Circle | null>(null);
+  const polygonRef = useRef<google.maps.Polygon | null>(null);
+  const polygonPointsRef = useRef<google.maps.Marker[]>([]);
+  const clickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
 
-  // Fetch leads from tRPC (standard list)
-  const { data: rawLeads, isLoading } = trpc.outreach.leads.list.useQuery(
-    { limit: 100 },
-    { retry: false, enabled: !radiusCentre },
+  // Filters + mode
+  const [statusFilter, setStatusFilter] = useState<LeadStatus | "all">("all");
+  const [scoreFilter, setScoreFilter] = useState<LeadScore | "all">("all");
+  const [drawMode, setDrawMode] = useState<DrawMode>("none");
+  const [radiusKm, setRadiusKm] = useState(5);
+  const [circleCenter, setCircleCenter] =
+    useState<google.maps.LatLngLiteral | null>(null);
+  const [polygonPath, setPolygonPath] = useState<google.maps.LatLngLiteral[]>(
+    [],
   );
 
-  // Fetch nearby leads when radius search is active
-  const { data: nearbyLeads, isLoading: isLoadingNearby } = trpc.outreach.leads.nearby.useQuery(
-    {
-      lat: radiusCentre?.lat ?? 0,
-      lng: radiusCentre?.lng ?? 0,
-      radiusKm,
-      limit: 200,
-    },
-    { retry: false, enabled: !!radiusCentre },
-  );
+  // Area scrape dialog
+  const [areaQuery, setAreaQuery] = useState("");
+  const [showAreaDialog, setShowAreaDialog] = useState(false);
 
-  // Use nearby query when radius is set, otherwise standard list
-  const activeData = radiusCentre ? nearbyLeads : rawLeads;
-  const allLeads = toMapLeads(
-    activeData && activeData.length > 0 ? activeData : [...SEED_LEADS],
-  );
+  // Map lifecycle
+  const [mapReady, setMapReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
 
-  const filteredLeads = allLeads.filter((lead) => {
-    if (statusFilter !== "all" && lead.status !== statusFilter) return false;
-    if (scoreFilter !== "all" && lead.score !== scoreFilter) return false;
-    return true;
+  // ───────── Data queries ─────────
+  const leadsQuery = trpc.outreach.leads.list.useQuery({
+    limit: 100,
+    status: statusFilter === "all" ? undefined : statusFilter,
+    score: scoreFilter === "all" ? undefined : scoreFilter,
   });
 
-  const hasMapboxToken = !!process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
-
-  // Initialize Mapbox
-  useEffect(() => {
-    if (!hasMapboxToken || !mapContainer.current || mapRef.current) return;
-
-    let cancelled = false;
-
-    async function initMap() {
-      const mapboxgl = (await import("mapbox-gl")).default;
-
-      if (cancelled || !mapContainer.current) return;
-
-      mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
-
-      const map = new mapboxgl.Map({
-        container: mapContainer.current,
-        style: MAPBOX_DARK_STYLE,
-        center: [144.963, -37.814], // Melbourne CBD
-        zoom: 9.5,
-        pitch: 0,
-        attributionControl: false,
-      });
-
-      map.addControl(
-        new mapboxgl.AttributionControl({ compact: true }),
-        "bottom-left",
-      );
-
-      map.on("load", () => {
-        if (!cancelled) {
-          mapRef.current = map;
-          setMapLoaded(true);
-
-          // ── Leads GeoJSON source with clustering ──
-          map.addSource("leads", {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: [] },
-            cluster: true,
-            clusterMaxZoom: 14,
-            clusterRadius: 50,
-          });
-
-          // Cluster circles
-          map.addLayer({
-            id: "clusters",
-            type: "circle",
-            source: "leads",
-            filter: ["has", "point_count"],
-            paint: {
-              "circle-color": [
-                "step",
-                ["get", "point_count"],
-                "#00BFA6", // teal for small clusters
-                10,
-                "#f59e0b", // amber for medium
-                50,
-                "#ef4444", // red for large
-              ],
-              "circle-radius": [
-                "step",
-                ["get", "point_count"],
-                16, 10, 22, 50, 30,
-              ],
-              "circle-opacity": 0.85,
-              "circle-stroke-width": 2,
-              "circle-stroke-color": "rgba(255,255,255,0.15)",
-            },
-          });
-
-          // Cluster count labels
-          map.addLayer({
-            id: "cluster-count",
-            type: "symbol",
-            source: "leads",
-            filter: ["has", "point_count"],
-            layout: {
-              "text-field": ["get", "point_count_abbreviated"],
-              "text-font": ["DIN Pro Medium", "Arial Unicode MS Bold"],
-              "text-size": 12,
-            },
-            paint: {
-              "text-color": "#ffffff",
-            },
-          });
-
-          // Individual unclustered lead points
-          map.addLayer({
-            id: "unclustered-point",
-            type: "circle",
-            source: "leads",
-            filter: ["!", ["has", "point_count"]],
-            paint: {
-              "circle-color": [
-                "match",
-                ["get", "score"],
-                "hot", "#ef4444",
-                "warm", "#f59e0b",
-                "cold", "#60a5fa",
-                "#94a3b8", // unscored default
-              ],
-              "circle-radius": 7,
-              "circle-stroke-width": 2,
-              "circle-stroke-color": [
-                "match",
-                ["get", "score"],
-                "hot", "rgba(239,68,68,0.3)",
-                "warm", "rgba(245,158,11,0.3)",
-                "cold", "rgba(96,165,250,0.3)",
-                "rgba(148,163,184,0.3)",
-              ],
-            },
-          });
-
-          // ── Cluster click: zoom into cluster ──
-          map.on("click", "clusters", (e: any) => {
-            const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
-            const feature = features?.[0];
-            if (!feature?.properties) return;
-            const clusterId = feature.properties.cluster_id;
-            const coords = (feature.geometry as any).coordinates as [number, number];
-            (map.getSource("leads") as any).getClusterExpansionZoom(
-              clusterId,
-              (err: any, zoom: number) => {
-                if (err) return;
-                map.easeTo({ center: coords, zoom });
-              },
-            );
-          });
-
-          // ── Point click: select lead ──
-          map.on("click", "unclustered-point", (e: any) => {
-            if (!e.features?.length) return;
-            const props = e.features[0].properties;
-            // Store lead ID so the effect can pick it up
-            const detail = new CustomEvent("recon:select-lead", { detail: props.id });
-            window.dispatchEvent(detail);
-          });
-
-          // Cursor changes
-          map.on("mouseenter", "clusters", () => { map.getCanvas().style.cursor = "pointer"; });
-          map.on("mouseleave", "clusters", () => { map.getCanvas().style.cursor = ""; });
-          map.on("mouseenter", "unclustered-point", () => { map.getCanvas().style.cursor = "pointer"; });
-          map.on("mouseleave", "unclustered-point", () => { map.getCanvas().style.cursor = ""; });
-
-          // Add an empty GeoJSON source for the radius circle
-          map.addSource("radius-circle", {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: [] },
-          });
-          map.addLayer({
-            id: "radius-circle-fill",
-            type: "fill",
-            source: "radius-circle",
-            paint: {
-              "fill-color": "#00BFA6",
-              "fill-opacity": 0.08,
-            },
-          });
-          map.addLayer({
-            id: "radius-circle-stroke",
-            type: "line",
-            source: "radius-circle",
-            paint: {
-              "line-color": "#00BFA6",
-              "line-width": 1.5,
-              "line-opacity": 0.4,
-            },
-          });
+  const nearbyEnabled = !!circleCenter && drawMode === "radius";
+  const nearbyQuery = trpc.outreach.leads.nearby.useQuery(
+    circleCenter
+      ? {
+          lat: circleCenter.lat,
+          lng: circleCenter.lng,
+          radiusKm,
+          score: scoreFilter === "all" ? undefined : scoreFilter,
+          limit: 200,
         }
+      : { lat: 0, lng: 0, radiusKm: 1, limit: 1 },
+    { enabled: nearbyEnabled },
+  );
+
+  const activeLeads: MapLead[] = useMemo(() => {
+    if (nearbyEnabled && nearbyQuery.data) {
+      return toMapLeads(nearbyQuery.data);
+    }
+    return toMapLeads(leadsQuery.data);
+  }, [nearbyEnabled, nearbyQuery.data, leadsQuery.data]);
+
+  // ───────── Create search mutation ─────────
+  const utils = trpc.useUtils();
+  const createSearch = trpc.outreach.searches.createFromArea.useMutation({
+    onSuccess: (search) => {
+      setShowAreaDialog(false);
+      setAreaQuery("");
+      utils.outreach.searches.list.invalidate();
+      window.dispatchEvent(
+        new CustomEvent("recon:toast", {
+          detail: `Queued scrape for "${search.query}". The worker will pick it up shortly.`,
+        }),
+      );
+    },
+  });
+
+  // ───────── Map init ─────────
+  useEffect(() => {
+    if (!apiKey || !mapDivRef.current || mapRef.current) return;
+
+    const loader = new Loader({
+      apiKey,
+      version: "weekly",
+      libraries: ["places", "geometry"],
+    });
+
+    loader
+      .load()
+      .then(() => {
+        if (!mapDivRef.current) return;
+
+        const mapOptions: google.maps.MapOptions = {
+          center: MELBOURNE_CENTER,
+          zoom: 10,
+          mapId: mapId || undefined,
+          styles: mapId ? undefined : DARK_MAP_STYLES,
+          disableDefaultUI: false,
+          zoomControl: true,
+          streetViewControl: false,
+          mapTypeControl: false,
+          fullscreenControl: false,
+          backgroundColor: "#0F1B2D",
+        };
+
+        const map = new google.maps.Map(mapDivRef.current, mapOptions);
+        mapRef.current = map;
+        infoWindowRef.current = new google.maps.InfoWindow();
+        setMapReady(true);
+      })
+      .catch((err) => {
+        console.error("[map] Failed to load Google Maps", err);
+        setMapError(err instanceof Error ? err.message : String(err));
+      });
+  }, [apiKey, mapId]);
+
+  // ───────── Marker sync ─────────
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+
+    const map = mapRef.current;
+    const existing = markersRef.current;
+    const iw = infoWindowRef.current;
+    const desiredIds = new Set(activeLeads.map((l) => l.id));
+
+    for (const [id, marker] of existing) {
+      if (!desiredIds.has(id)) {
+        marker.setMap(null);
+        existing.delete(id);
+      }
+    }
+
+    const fresh: google.maps.Marker[] = [];
+    for (const lead of activeLeads) {
+      let marker = existing.get(lead.id);
+      if (!marker) {
+        marker = new google.maps.Marker({
+          position: { lat: lead.lat, lng: lead.lng },
+          title: lead.name,
+          icon: buildMarkerIcon(lead.score),
+        });
+        const thisLead = lead;
+        marker.addListener("click", () => {
+          if (!iw) return;
+          iw.setContent(popupHtml(thisLead));
+          iw.open({ map, anchor: marker });
+          window.dispatchEvent(
+            new CustomEvent("recon:select-lead", { detail: thisLead.id }),
+          );
+        });
+        existing.set(lead.id, marker);
+      } else {
+        marker.setPosition({ lat: lead.lat, lng: lead.lng });
+        marker.setIcon(buildMarkerIcon(lead.score));
+      }
+      fresh.push(marker);
+    }
+
+    if (clustererRef.current) {
+      clustererRef.current.clearMarkers();
+    }
+    if (fresh.length > 0) {
+      clustererRef.current = new MarkerClusterer({
+        map,
+        markers: fresh,
+        algorithm: new SuperClusterAlgorithm({ radius: 60, maxZoom: 14 }),
       });
     }
+  }, [activeLeads, mapReady]);
 
-    initMap();
+  // ───────── Draw mode handlers ─────────
+  const clearDrawing = useCallback(() => {
+    if (circleRef.current) {
+      circleRef.current.setMap(null);
+      circleRef.current = null;
+    }
+    if (polygonRef.current) {
+      polygonRef.current.setMap(null);
+      polygonRef.current = null;
+    }
+    for (const m of polygonPointsRef.current) m.setMap(null);
+    polygonPointsRef.current = [];
+    setCircleCenter(null);
+    setPolygonPath([]);
+  }, []);
 
-    return () => {
-      cancelled = true;
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
+  const setMode = useCallback(
+    (mode: DrawMode) => {
+      clearDrawing();
+      if (clickListenerRef.current) {
+        clickListenerRef.current.remove();
+        clickListenerRef.current = null;
       }
-    };
-  }, [hasMapboxToken]);
+      setDrawMode(mode);
 
-  // Update GeoJSON source when leads or filters change (clustering handled by Mapbox)
+      if (!mapRef.current) return;
+      const map = mapRef.current;
+
+      if (mode === "radius") {
+        clickListenerRef.current = map.addListener(
+          "click",
+          (e: google.maps.MapMouseEvent) => {
+            if (!e.latLng) return;
+            const center = { lat: e.latLng.lat(), lng: e.latLng.lng() };
+            if (circleRef.current) circleRef.current.setMap(null);
+            circleRef.current = new google.maps.Circle({
+              map,
+              center,
+              radius: radiusKm * 1000,
+              fillColor: "#00BFA6",
+              fillOpacity: 0.12,
+              strokeColor: "#00BFA6",
+              strokeWeight: 2,
+            });
+            setCircleCenter(center);
+          },
+        );
+      }
+
+      if (mode === "polygon") {
+        const pts: google.maps.LatLngLiteral[] = [];
+        clickListenerRef.current = map.addListener(
+          "click",
+          (e: google.maps.MapMouseEvent) => {
+            if (!e.latLng) return;
+            const p = { lat: e.latLng.lat(), lng: e.latLng.lng() };
+            pts.push(p);
+            setPolygonPath([...pts]);
+
+            const pointMarker = new google.maps.Marker({
+              position: p,
+              map,
+              icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 4,
+                fillColor: "#00BFA6",
+                fillOpacity: 1,
+                strokeColor: "#fff",
+                strokeWeight: 1,
+              },
+            });
+            polygonPointsRef.current.push(pointMarker);
+
+            if (polygonRef.current) polygonRef.current.setMap(null);
+            if (pts.length >= 2) {
+              polygonRef.current = new google.maps.Polygon({
+                map,
+                paths: pts,
+                fillColor: "#00BFA6",
+                fillOpacity: 0.12,
+                strokeColor: "#00BFA6",
+                strokeWeight: 2,
+              });
+            }
+          },
+        );
+      }
+    },
+    [clearDrawing, radiusKm],
+  );
+
   useEffect(() => {
-    if (!mapRef.current || !mapLoaded) return;
-    const source = mapRef.current.getSource("leads");
-    if (!source) return;
+    if (circleRef.current) circleRef.current.setRadius(radiusKm * 1000);
+  }, [radiusKm]);
 
-    const geojson = {
-      type: "FeatureCollection" as const,
-      features: filteredLeads.map((lead) => ({
-        type: "Feature" as const,
-        geometry: {
-          type: "Point" as const,
-          coordinates: [lead.lng, lead.lat],
+  const canSubmit =
+    (drawMode === "radius" && !!circleCenter) ||
+    (drawMode === "polygon" && polygonPath.length >= 3);
+
+  const handleSubmitArea = () => {
+    if (!canSubmit || !areaQuery.trim()) return;
+
+    if (drawMode === "radius" && circleCenter) {
+      createSearch.mutate({
+        query: areaQuery.trim(),
+        area: {
+          type: "circle",
+          centerLat: circleCenter.lat,
+          centerLng: circleCenter.lng,
+          radiusKm,
         },
-        properties: {
-          id: lead.id,
-          name: lead.name,
-          category: lead.category,
-          suburb: lead.suburb,
-          rating: lead.rating,
-          reviewCount: lead.reviewCount,
-          score: lead.score,
-          status: lead.status,
+      });
+    } else if (drawMode === "polygon" && polygonPath.length >= 3) {
+      createSearch.mutate({
+        query: areaQuery.trim(),
+        area: {
+          type: "polygon",
+          points: polygonPath,
         },
-      })),
-    };
-
-    source.setData(geojson);
-  }, [filteredLeads, mapLoaded]);
-
-  // Listen for lead selection from the map click handler
-  useEffect(() => {
-    function handleSelect(e: Event) {
-      const leadId = (e as CustomEvent).detail;
-      const lead = filteredLeads.find((l) => l.id === leadId);
-      if (lead) setSelectedLead(lead);
+      });
     }
-    window.addEventListener("recon:select-lead", handleSelect);
-    return () => window.removeEventListener("recon:select-lead", handleSelect);
-  }, [filteredLeads]);
+  };
 
-  // Handle map click in radius mode
-  useEffect(() => {
-    if (!mapRef.current || !mapLoaded) return;
-
-    function handleClick(e: any) {
-      if (!radiusMode) return;
-      setRadiusCentre({ lat: e.lngLat.lat, lng: e.lngLat.lng });
-      setRadiusMode(false); // exit placement mode after click
-    }
-
-    mapRef.current.on("click", handleClick);
-    // Change cursor in radius mode
-    if (radiusMode) {
-      mapRef.current.getCanvas().style.cursor = "crosshair";
-    } else {
-      mapRef.current.getCanvas().style.cursor = "";
-    }
-
-    return () => {
-      mapRef.current?.off("click", handleClick);
-    };
-  }, [radiusMode, mapLoaded]);
-
-  // Draw radius circle on map
-  useEffect(() => {
-    if (!mapRef.current || !mapLoaded) return;
-    const source = mapRef.current.getSource("radius-circle");
-    if (!source) return;
-
-    if (!radiusCentre) {
-      source.setData({ type: "FeatureCollection", features: [] });
-      return;
-    }
-
-    // Generate a circle polygon (64 points)
-    const steps = 64;
-    const coords: [number, number][] = [];
-    const earthRadiusKm = 6371;
-    for (let i = 0; i <= steps; i++) {
-      const angle = (i / steps) * 2 * Math.PI;
-      const dLat = (radiusKm / earthRadiusKm) * (180 / Math.PI);
-      const dLng =
-        dLat / Math.cos((radiusCentre.lat * Math.PI) / 180);
-      coords.push([
-        radiusCentre.lng + dLng * Math.cos(angle),
-        radiusCentre.lat + dLat * Math.sin(angle),
-      ]);
-    }
-
-    source.setData({
-      type: "FeatureCollection",
-      features: [
-        {
-          type: "Feature",
-          geometry: { type: "Polygon", coordinates: [coords] },
-          properties: {},
-        },
-      ],
-    });
-  }, [radiusCentre, radiusKm, mapLoaded]);
-
-  // Fly to selected lead
-  useEffect(() => {
-    if (!mapRef.current || !selectedLead) return;
-    mapRef.current.flyTo({
-      center: [selectedLead.lng, selectedLead.lat],
-      zoom: 12,
-      duration: 800,
-    });
-  }, [selectedLead]);
+  if (!apiKey) {
+    return <FallbackMap leads={toMapLeads(leadsQuery.data)} />;
+  }
 
   return (
-    <div className="flex h-full">
-      {/* Map area */}
-      <div className="relative flex-1">
-        {/* Map filter overlay */}
-        <div className="absolute left-3 top-3 z-10 flex items-center gap-2">
-          <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
-            <Filter className="h-3.5 w-3.5 text-slate-400" />
-            <select
-              value={scoreFilter}
-              onChange={(e) => setScoreFilter(e.target.value)}
-              className="bg-transparent text-xs text-slate-300 outline-none"
-            >
-              <option value="all" className="bg-brand-navy-900">All Scores</option>
-              <option value="hot" className="bg-brand-navy-900">Hot</option>
-              <option value="warm" className="bg-brand-navy-900">Warm</option>
-              <option value="cold" className="bg-brand-navy-900">Cold</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="bg-transparent text-xs text-slate-300 outline-none"
-            >
-              <option value="all" className="bg-brand-navy-900">All Status</option>
-              <option value="new" className="bg-brand-navy-900">New</option>
-              <option value="qualified" className="bg-brand-navy-900">Qualified</option>
-              <option value="contacted" className="bg-brand-navy-900">Contacted</option>
-              <option value="proposal" className="bg-brand-navy-900">Proposal</option>
-            </select>
+    <div className="relative flex h-full min-h-[600px] w-full overflow-hidden bg-slate-950">
+      <div ref={mapDivRef} className="h-full w-full" />
+
+      {mapError && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/80">
+          <div className="max-w-md rounded border border-red-900 bg-slate-900 p-4 text-sm text-red-300">
+            Map failed to load: {mapError}
           </div>
         </div>
+      )}
 
-        {/* Radius search controls */}
-        <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
-          {/* Lead count badge */}
-          <div className="rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
-            <span className="font-mono text-xs text-brand-teal">
-              {filteredLeads.length}
-            </span>
-            <span className="ml-1 text-xs text-slate-400">leads</span>
-            {(isLoading || isLoadingNearby) && (
-              <Loader2 className="ml-1.5 inline h-3 w-3 animate-spin text-brand-teal" />
-            )}
-          </div>
+      {/* Top toolbar */}
+      <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center">
+        <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/95 px-3 py-2 shadow-lg backdrop-blur">
+          <select
+            value={statusFilter}
+            onChange={(e) =>
+              setStatusFilter(e.target.value as LeadStatus | "all")
+            }
+            className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-200"
+          >
+            <option value="all">All statuses</option>
+            <option value="new">New</option>
+            <option value="qualified">Qualified</option>
+            <option value="contacted">Contacted</option>
+            <option value="proposal">Proposal</option>
+          </select>
+          <select
+            value={scoreFilter}
+            onChange={(e) =>
+              setScoreFilter(e.target.value as LeadScore | "all")
+            }
+            className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-200"
+          >
+            <option value="all">All scores</option>
+            <option value="hot">Hot</option>
+            <option value="warm">Warm</option>
+            <option value="cold">Cold</option>
+            <option value="unscored">Unscored</option>
+          </select>
 
-          {/* Radius search toggle */}
-          {!radiusCentre ? (
+          <div className="mx-1 h-5 w-px bg-slate-700" />
+
+          <button
+            type="button"
+            onClick={() => setMode(drawMode === "radius" ? "none" : "radius")}
+            className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium ${
+              drawMode === "radius"
+                ? "bg-teal-500 text-slate-900"
+                : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+            }`}
+            title="Click a point to draw a radius"
+          >
+            <Circle className="h-3 w-3" /> Radius
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode(drawMode === "polygon" ? "none" : "polygon")}
+            className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium ${
+              drawMode === "polygon"
+                ? "bg-teal-500 text-slate-900"
+                : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+            }`}
+            title="Click multiple points to draw an area"
+          >
+            <Pencil className="h-3 w-3" /> Polygon
+          </button>
+          {drawMode !== "none" && (
             <button
-              onClick={() => setRadiusMode(!radiusMode)}
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs backdrop-blur-sm transition-colors ${
-                radiusMode
-                  ? "border-brand-teal/50 bg-brand-teal/20 text-brand-teal"
-                  : "border-white/10 bg-brand-navy-900/80 text-slate-400 hover:text-slate-200"
-              }`}
+              type="button"
+              onClick={() => setMode("none")}
+              className="flex items-center gap-1 rounded bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
             >
-              <MapPin className="h-3.5 w-3.5" />
-              {radiusMode ? "Click map to set centre" : "Radius search"}
+              <X className="h-3 w-3" /> Clear
             </button>
-          ) : (
-            <div className="flex flex-col gap-1.5 rounded-lg border border-brand-teal/30 bg-brand-navy-900/80 px-3 py-2 backdrop-blur-sm">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[10px] uppercase tracking-wider text-brand-teal">Radius</span>
-                <button
-                  onClick={() => {
-                    setRadiusCentre(null);
-                    setRadiusMode(false);
-                  }}
-                  className="text-slate-400 hover:text-white"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min={1}
-                  max={50}
-                  value={radiusKm}
-                  onChange={(e) => setRadiusKm(Number(e.target.value))}
-                  className="h-1 w-24 accent-brand-teal"
-                />
-                <span className="font-mono text-xs text-slate-300">{radiusKm}km</span>
-              </div>
-            </div>
           )}
         </div>
-
-        {/* Score legend */}
-        <div className="absolute bottom-3 left-3 z-10 flex items-center gap-3 rounded-lg border border-white/10 bg-brand-navy-900/80 px-3 py-1.5 backdrop-blur-sm">
-          {Object.entries(SCORE_COLORS).map(([score, color]) => (
-            <div key={score} className="flex items-center gap-1.5">
-              <span
-                className="h-2.5 w-2.5 rounded-full"
-                style={{ background: color }}
-              />
-              <span className="text-xs capitalize text-slate-400">{score}</span>
-            </div>
-          ))}
-        </div>
-
-        {hasMapboxToken ? (
-          /* Real Mapbox map */
-          <div ref={mapContainer} className="h-full w-full" />
-        ) : (
-          /* Fallback: styled SVG map when no Mapbox token */
-          <FallbackMap
-            leads={filteredLeads}
-            selectedId={selectedLead?.id ?? null}
-            onSelectLead={setSelectedLead}
-          />
-        )}
       </div>
 
-      {/* Detail panel */}
-      {selectedLead && (
-        <div className="hidden w-80 flex-shrink-0 border-l border-slate-200 md:block">
-          <LeadDetail
-            lead={selectedLead}
-            onClose={() => setSelectedLead(null)}
+      {drawMode === "radius" && circleCenter && (
+        <div className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-lg border border-slate-700 bg-slate-900/95 px-4 py-3 shadow-lg backdrop-blur">
+          <div className="mb-1 flex items-center gap-2 text-xs text-slate-400">
+            <Target className="h-3 w-3" /> Radius: {radiusKm} km
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={50}
+            value={radiusKm}
+            onChange={(e) => setRadiusKm(Number(e.target.value))}
+            className="w-64 accent-teal-500"
           />
         </div>
       )}
-    </div>
-  );
-}
 
-/** Fallback map when no Mapbox token is configured */
-function FallbackMap({
-  leads,
-  selectedId,
-  onSelectLead,
-}: {
-  leads: MapLead[];
-  selectedId: string | null;
-  onSelectLead: (lead: MapLead) => void;
-}) {
-  const toXY = (lat: number, lng: number) => {
-    const x = ((lng - 144.0) / (145.5 - 144.0)) * 100;
-    const y = ((lat - -38.3) / (-37.5 - -38.3)) * 100;
-    return {
-      x: Math.max(3, Math.min(97, x)),
-      y: Math.max(3, Math.min(97, 100 - y)),
-    };
-  };
-
-  return (
-    <div className="relative h-full w-full overflow-hidden bg-[#1a1f2e]">
-      {/* Grid */}
-      <svg className="absolute inset-0 h-full w-full opacity-[0.06]">
-        {Array.from({ length: 30 }, (_, i) => (
-          <line key={`h${i}`} x1="0" y1={`${(i / 30) * 100}%`} x2="100%" y2={`${(i / 30) * 100}%`} stroke="#00BFA6" strokeWidth="0.5" />
-        ))}
-        {Array.from({ length: 30 }, (_, i) => (
-          <line key={`v${i}`} x1={`${(i / 30) * 100}%`} y1="0" x2={`${(i / 30) * 100}%`} y2="100%" stroke="#00BFA6" strokeWidth="0.5" />
-        ))}
-      </svg>
-
-      {/* Region label */}
-      <div className="absolute left-4 top-4 font-mono text-[10px] uppercase tracking-[0.2em] text-brand-teal/20">
-        Melbourne Metropolitan Area
-      </div>
-
-      {/* No token notice */}
-      <div className="absolute bottom-3 right-3 rounded bg-brand-navy-900/60 px-2 py-1 text-[10px] text-slate-500">
-        Set NEXT_PUBLIC_MAPBOX_TOKEN for real map
-      </div>
-
-      {/* Lead pins */}
-      {leads.map((lead) => {
-        const pos = toXY(lead.lat, lead.lng);
-        const isSelected = lead.id === selectedId;
-        const color = SCORE_COLORS[lead.score] ?? "#94a3b8";
-
-        return (
+      {canSubmit && !showAreaDialog && (
+        <div className="absolute bottom-20 right-4 z-10 flex flex-col gap-2">
           <button
-            key={lead.id}
-            onClick={() => onSelectLead(lead)}
-            className="group absolute -translate-x-1/2 -translate-y-1/2 transition-transform hover:scale-125"
-            style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+            type="button"
+            onClick={() => setShowAreaDialog(true)}
+            className="flex items-center gap-2 rounded-lg bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-900 shadow-lg hover:bg-teal-400"
           >
-            {isSelected && (
-              <span
-                className="absolute -inset-1 animate-ping rounded-full opacity-75"
-                style={{ background: `${color}30` }}
-              />
-            )}
-            <span
-              className="block rounded-full border-2"
-              style={{
-                width: isSelected ? 18 : 12,
-                height: isSelected ? 18 : 12,
-                background: color,
-                borderColor: isSelected ? "#fff" : `${color}60`,
-                boxShadow: `0 0 ${isSelected ? 14 : 8}px ${color}80`,
-              }}
-            />
-            {/* Tooltip */}
-            <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
-              <div className="whitespace-nowrap rounded-md border border-slate-700 bg-brand-navy-900 px-2.5 py-1.5 text-left shadow-xl">
-                <div className="text-xs font-semibold text-white">{lead.name}</div>
-                <div className="mt-0.5 text-[10px] text-slate-400">
-                  {lead.category} · {lead.suburb}
-                </div>
-                <div className="mt-0.5 text-[10px] text-amber-400">
-                  ★ {lead.rating} ({lead.reviewCount} reviews)
-                </div>
-              </div>
-            </div>
+            <Plus className="h-4 w-4" /> Scrape this area
           </button>
-        );
-      })}
+        </div>
+      )}
+
+      {showAreaDialog && (
+        <div className="absolute bottom-4 right-4 z-20 w-80 rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-white">
+              Scrape this area
+            </h3>
+            <button
+              onClick={() => setShowAreaDialog(false)}
+              className="text-slate-400 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <label className="mb-1 block text-xs text-slate-400">
+            Business type to search
+          </label>
+          <input
+            autoFocus
+            value={areaQuery}
+            onChange={(e) => setAreaQuery(e.target.value)}
+            placeholder="e.g. physiotherapist, cafe, NDIS provider"
+            className="mb-3 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-teal-500 focus:outline-none"
+          />
+          <div className="mb-3 text-xs text-slate-500">
+            {drawMode === "radius" && circleCenter ? (
+              <>
+                Circle: {radiusKm} km around {circleCenter.lat.toFixed(4)},{" "}
+                {circleCenter.lng.toFixed(4)}
+              </>
+            ) : (
+              <>Polygon: {polygonPath.length} points</>
+            )}
+          </div>
+          <button
+            onClick={handleSubmitArea}
+            disabled={!areaQuery.trim() || createSearch.isPending}
+            className="flex w-full items-center justify-center gap-2 rounded bg-teal-500 px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {createSearch.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Queuing...
+              </>
+            ) : (
+              <>
+                <Search className="h-4 w-4" /> Queue scrape
+              </>
+            )}
+          </button>
+          {createSearch.error && (
+            <p className="mt-2 text-xs text-red-400">
+              {createSearch.error.message}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="absolute bottom-4 left-4 z-10 rounded-lg border border-slate-700 bg-slate-900/95 px-3 py-2 text-xs text-slate-300 shadow-lg backdrop-blur">
+        <div className="mb-1 font-semibold text-white">
+          {activeLeads.length} leads
+        </div>
+        <div className="flex flex-col gap-0.5">
+          {(["hot", "warm", "cold", "unscored"] as LeadScore[]).map((s) => (
+            <div key={s} className="flex items-center gap-2">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: SCORE_COLORS[s] }}
+              />
+              <span className="capitalize">{s}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {(leadsQuery.isLoading || nearbyQuery.isFetching) && (
+        <div className="absolute top-20 right-4 z-10 flex items-center gap-2 rounded bg-slate-900/90 px-3 py-1.5 text-xs text-slate-300">
+          <Loader2 className="h-3 w-3 animate-spin" /> Loading leads...
+        </div>
+      )}
+
     </div>
   );
 }
+
+export default MapView;

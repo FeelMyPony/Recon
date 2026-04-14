@@ -262,6 +262,77 @@ export const outreachRouter = createTRPCRouter({
 
         return search;
       }),
+
+    /**
+     * Create a search job from a map-drawn area (circle or polygon).
+     * The local scraper worker picks this up by polling status='pending'.
+     * Geometry is stored under `filters` so we don't need a migration.
+     */
+    createFromArea: protectedProcedure
+      .input(
+        z.object({
+          query: z.string().min(1).max(200),
+          area: z.discriminatedUnion("type", [
+            z.object({
+              type: z.literal("circle"),
+              centerLat: z.number().min(-90).max(90),
+              centerLng: z.number().min(-180).max(180),
+              radiusKm: z.number().min(0.1).max(50),
+            }),
+            z.object({
+              type: z.literal("polygon"),
+              points: z
+                .array(
+                  z.object({
+                    lat: z.number().min(-90).max(90),
+                    lng: z.number().min(-180).max(180),
+                  }),
+                )
+                .min(3)
+                .max(64),
+            }),
+          ]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Build a human-readable location label from geometry for the worker.
+        const location =
+          input.area.type === "circle"
+            ? `${input.area.radiusKm}km radius @ ${input.area.centerLat.toFixed(4)},${input.area.centerLng.toFixed(4)}`
+            : `polygon (${input.area.points.length} points)`;
+
+        const rows = await ctx.db
+          .insert(searches)
+          .values({
+            workspaceId: ctx.workspaceId,
+            query: input.query,
+            location,
+            filters: { area: input.area },
+          })
+          .returning();
+
+        const search = rows[0]!;
+
+        try {
+          const { emitEvent } = await import("@recon/events");
+          await emitEvent(
+            "outreach.search.created",
+            ctx.workspaceId,
+            "outreach",
+            {
+              searchId: search.id,
+              query: input.query,
+              location,
+              area: input.area,
+            },
+          );
+        } catch (err) {
+          // Local worker will pick it up by polling - event bus is optional
+          console.warn("[outreach] emit search.created failed (expected in dev):", err);
+        }
+
+        return search;
+      }),
   }),
 
   // ──────────────────────────────────────────────
