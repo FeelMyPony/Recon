@@ -10,6 +10,8 @@
     "db:migrate": "turbo db:migrate",
     "db:seed": "turbo db:seed",
     "db:studio": "turbo db:studio",
+    "setup:ai": "bash scripts/setup-local-ai.sh",
+    "dev:local": "bash scripts/dev-local.sh",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\""
   },
   "devDependencies": {

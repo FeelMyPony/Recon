@@ -39,25 +39,53 @@ export async function generateCompletion(
     lmStudioTimeout = 5000,
   } = options;
 
-  // 1. Try LM Studio first
-  const lmBaseUrl = process.env.LM_STUDIO_BASE_URL;
-  const lmModel = process.env.LM_STUDIO_MODEL ?? "google/gemma-3-4b-it";
+  // 1. Try local LLM first (LM Studio OR Ollama — both expose OpenAI-compatible APIs)
+  //    Priority: explicit LOCAL_LLM_BASE_URL > Ollama (default port) > LM Studio (default port)
+  const localCandidates: Array<{ url: string; model: string; label: string }> = [];
 
-  if (lmBaseUrl) {
+  // Explicit override (user-configured)
+  if (process.env.LOCAL_LLM_BASE_URL) {
+    localCandidates.push({
+      url: process.env.LOCAL_LLM_BASE_URL,
+      model: process.env.LOCAL_LLM_MODEL ?? "gemma3:4b",
+      label: "local-llm",
+    });
+  }
+
+  // Ollama (default port 11434)
+  if (process.env.OLLAMA_BASE_URL || !process.env.LOCAL_LLM_BASE_URL) {
+    localCandidates.push({
+      url: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+      model: process.env.OLLAMA_MODEL ?? "gemma3:4b",
+      label: "ollama",
+    });
+  }
+
+  // LM Studio (default port 1234)
+  if (process.env.LM_STUDIO_BASE_URL) {
+    localCandidates.push({
+      url: process.env.LM_STUDIO_BASE_URL,
+      model: process.env.LM_STUDIO_MODEL ?? "google/gemma-3-4b-it",
+      label: "lm-studio",
+    });
+  }
+
+  for (const candidate of localCandidates) {
     try {
-      const result = await callLMStudio(
-        lmBaseUrl,
-        lmModel,
+      const result = await callLocalLLM(
+        candidate.url,
+        candidate.model,
         prompt,
         systemPrompt,
         maxTokens,
         temperature,
         lmStudioTimeout,
       );
+      console.log(`[ai] Used ${candidate.label} (${candidate.model})`);
       return result;
     } catch (err) {
       console.warn(
-        "[ai] LM Studio unavailable, falling back to Claude:",
+        `[ai] ${candidate.label} unavailable:`,
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -74,9 +102,9 @@ export async function generateCompletion(
   return callClaude(anthropicKey, prompt, systemPrompt, maxTokens, temperature);
 }
 
-// ─── LM Studio (OpenAI-compatible) ────────────────────────────────────
+// ─── Local LLM (Ollama / LM Studio — OpenAI-compatible) ───────────────
 
-async function callLMStudio(
+async function callLocalLLM(
   baseUrl: string,
   model: string,
   prompt: string,
@@ -108,13 +136,13 @@ async function callLMStudio(
     });
 
     if (!response.ok) {
-      throw new Error(`LM Studio HTTP ${response.status}: ${await response.text()}`);
+      throw new Error(`Local LLM HTTP ${response.status}: ${await response.text()}`);
     }
 
     const data = await response.json();
     const text = data.choices?.[0]?.message?.content ?? "";
 
-    console.log("[ai] LM Studio response", {
+    console.log("[ai] Local LLM response", {
       model,
       promptTokens: data.usage?.prompt_tokens,
       completionTokens: data.usage?.completion_tokens,
@@ -124,7 +152,7 @@ async function callLMStudio(
       text: text.trim(),
       model,
       costCents: 0, // Local model = free
-      provider: "lm-studio",
+      provider: "lm-studio", // Keep this for type compatibility
     };
   } finally {
     clearTimeout(timeout);

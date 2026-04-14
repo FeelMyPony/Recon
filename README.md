@@ -6,13 +6,31 @@ AI-powered outreach automation platform.
 
 - Node.js 20+
 - pnpm 9+
-- Docker
+- Docker (for Postgres + Mailpit)
+- Homebrew (macOS — for Ollama install)
 
-## Quick Start
+## Press-and-play local setup
 
 ```bash
-docker compose up -d
-cp .env.example .env
+# One-time setup (installs Ollama + pulls Gemma, runs docker, copies .env)
+pnpm install
+pnpm setup:ai
+
+# Daily use — one command starts everything
+pnpm dev:local
+```
+
+That's it. `pnpm dev:local` starts Ollama, Postgres, Mailpit, and the Next.js dev server. Scraping + AI analysis both run locally on your machine using Ollama with Gemma 3 4B (~free, ~1-2s per analysis).
+
+**Open http://localhost:3000** — login with Google or magic link (magic links appear in Mailpit at http://localhost:8025).
+
+## Quick Start (manual)
+
+```bash
+docker compose up -d          # Postgres + Mailpit
+ollama serve &                 # Local LLM (optional)
+ollama pull gemma3:4b
+cp .env.example .env           # Fill in OUTSCRAPER_API_KEY
 pnpm install && pnpm dev
 ```
 
@@ -43,12 +61,15 @@ infra/
 
 | Command            | Description                        |
 | ------------------ | ---------------------------------- |
+| `pnpm dev:local`   | **Press-and-play:** Ollama + Docker + Next.js |
+| `pnpm setup:ai`    | One-time: install Ollama + pull Gemma |
 | `pnpm dev`         | Start all apps in development mode |
 | `pnpm build`       | Build all packages and apps        |
 | `pnpm lint`        | Run ESLint across the monorepo     |
 | `pnpm typecheck`   | Run TypeScript type checking       |
 | `pnpm db:generate` | Generate Drizzle migrations        |
 | `pnpm db:migrate`  | Apply database migrations          |
+| `pnpm db:seed`     | Seed database with dev data        |
 | `pnpm db:studio`   | Open Drizzle Studio                |
 
 ## Environment Variables
