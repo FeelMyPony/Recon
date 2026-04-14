@@ -106,10 +106,26 @@ Mailpit UI: http://localhost:8025 (catches magic link emails)
 - Radius search UI on map (click-to-place centre, adjustable km slider, circle overlay)
 - Vercel deployment config (vercel.json, standalone output)
 
-### Not Done Yet
-- **CSV import/export**: Bulk lead operations via S3
-- **Team invitations**: Multi-user workspace access
-- **AWS deployment**: Run Terraform, run migrations on RDS
+### Done (Phase 4 — Production Features)
+- CSV export with filters + CSV import with drag-drop, column auto-mapping, preview, dedup
+- Team invitations: workspace_members table, invite by email, roles (owner/admin/member/viewer), accept/remove
+- Multi-user workspace access: tRPC context checks workspace_members for non-owner access
+- Onboarding: EmptyState component for all pages, setup checklist banner
+- Activity log: activity.list/log tRPC procedures, auto-logging on key actions, live feed in analytics
+- Toast notification system (success/error/info/warning, auto-dismiss, slide-in animation)
+- Lead detail: AI analysis section fetches review_analyses (strengths, weaknesses, opportunities, rationale)
+- Compose email dialog on lead detail with template selection + merge field rendering
+- Sequence detail dialog with step management (add/remove/reorder)
+- Supabase: 17 tables migrated + RLS + seed data (workspace, 10 leads, 4 templates, owner member)
+- Deployed on Vercel + GitHub CI
+
+### Remaining Ideas (not blocking launch)
+- Real-time WebSocket updates for email status changes
+- Bulk email sending from leads table selection
+- Advanced analytics: time-series charts, cohort analysis
+- White-label support per workspace
+- Public REST API for third-party integrations
+- Webhook integrations (Zapier, CRM sync)
 
 ## Rules
 - Always use the module-first pattern — new features go in their module, not shared
