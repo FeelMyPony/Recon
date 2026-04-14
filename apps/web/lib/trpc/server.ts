@@ -1,7 +1,8 @@
-import { eq } from "drizzle-orm";
+import { eq, and, isNotNull } from "drizzle-orm";
 import { auth } from "@recon/auth";
 import { getDb } from "@recon/db/client";
 import { workspaces } from "@recon/shared/schema/workspaces";
+import { workspaceMembers } from "@recon/shared/schema/members";
 import { createTRPCRouter, type TRPCContext } from "@recon/outreach/trpc";
 import { outreachRouter } from "@recon/outreach/router";
 
@@ -21,13 +22,30 @@ export async function createTRPCContext(): Promise<TRPCContext> {
   let workspaceId = "";
 
   if (userId) {
-    const [ws] = await db
+    // 1. Check if the user owns a workspace
+    const [owned] = await db
       .select({ id: workspaces.id })
       .from(workspaces)
       .where(eq(workspaces.ownerId, userId))
       .limit(1);
 
-    workspaceId = ws?.id ?? "";
+    if (owned) {
+      workspaceId = owned.id;
+    } else {
+      // 2. Check if the user is an accepted member of another workspace
+      const [membership] = await db
+        .select({ workspaceId: workspaceMembers.workspaceId })
+        .from(workspaceMembers)
+        .where(
+          and(
+            eq(workspaceMembers.userId, userId),
+            isNotNull(workspaceMembers.acceptedAt),
+          ),
+        )
+        .limit(1);
+
+      workspaceId = membership?.workspaceId ?? "";
+    }
   }
 
   return { db, userId, workspaceId };

@@ -6,7 +6,7 @@ RECON is a multi-tenant AI-powered outreach automation platform built for the Au
 Architected for expansion into workforce management and other verticals.
 
 ## Tech Stack
-- **Frontend**: Next.js 15 App Router (Vercel) + Tailwind CSS + shadcn/ui + Mapbox GL
+- **Frontend**: Next.js 15 App Router (Vercel) + Tailwind CSS + shadcn/ui + Google Maps JS API
 - **API**: tRPC v11 (end-to-end type safety, superjson transformer)
 - **Auth**: Auth.js v5 (magic link via SES/Mailpit + Google OAuth, DB sessions)
 - **ORM**: Drizzle ORM with drizzle-kit migrations

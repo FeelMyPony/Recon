@@ -9,6 +9,14 @@ import {
   Save,
   CheckCircle2,
   Loader2,
+  Plus,
+  X,
+  Trash2,
+  Shield,
+  Crown,
+  UserCheck,
+  Eye,
+  Clock,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
 
@@ -325,39 +333,236 @@ function ApiKeysSettings() {
   );
 }
 
+const ROLE_CONFIG = {
+  owner: { label: "Owner", icon: Crown, color: "bg-amber-50 text-amber-700" },
+  admin: { label: "Admin", icon: Shield, color: "bg-purple-50 text-purple-700" },
+  member: { label: "Member", icon: UserCheck, color: "bg-brand-teal/10 text-brand-teal" },
+  viewer: { label: "Viewer", icon: Eye, color: "bg-slate-100 text-slate-600" },
+} as const;
+
 function TeamSettings() {
+  const membersQuery = trpc.outreach.workspace.members.useQuery();
+  const utils = trpc.useUtils();
+
+  const inviteMut = trpc.outreach.workspace.invite.useMutation({
+    onSuccess: () => {
+      utils.outreach.workspace.members.invalidate();
+      setShowInvite(false);
+      setInviteEmail("");
+      setInviteRole("member");
+    },
+  });
+
+  const removeMut = trpc.outreach.workspace.removeMember.useMutation({
+    onSuccess: () => utils.outreach.workspace.members.invalidate(),
+  });
+
+  const updateRoleMut = trpc.outreach.workspace.updateRole.useMutation({
+    onSuccess: () => utils.outreach.workspace.members.invalidate(),
+  });
+
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"admin" | "member" | "viewer">("member");
+
+  const members = membersQuery.data ?? [];
+
+  const handleInvite = () => {
+    if (!inviteEmail.trim()) return;
+    inviteMut.mutate({ email: inviteEmail.trim(), role: inviteRole });
+  };
+
   return (
     <div className="max-w-xl space-y-6">
-      <div>
-        <h3 className="text-base font-semibold text-brand-navy-900">Team</h3>
-        <p className="mt-0.5 text-xs text-slate-500">
-          Manage team members and roles
-        </p>
-      </div>
-
-      <div className="rounded-lg border border-slate-200 bg-white p-4">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-teal text-sm font-bold text-white">
-            S
-          </div>
-          <div>
-            <div className="text-sm font-medium text-brand-navy-900">You (Owner)</div>
-            <div className="text-xs text-slate-500">stefan@recon.app</div>
-          </div>
-          <span className="ml-auto rounded-full bg-brand-teal/10 px-2 py-0.5 text-[10px] font-medium text-brand-teal">
-            Owner
-          </span>
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-base font-semibold text-brand-navy-900">Team</h3>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Manage team members and roles
+          </p>
         </div>
+        <button
+          onClick={() => setShowInvite(true)}
+          className="flex items-center gap-2 rounded-md bg-brand-teal px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-teal-600"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Invite Member
+        </button>
       </div>
 
-      <button className="flex items-center gap-2 rounded-md border border-slate-200 px-4 py-2 text-sm font-medium text-brand-navy-900 transition-colors hover:bg-slate-50">
-        <Users className="h-4 w-4" />
-        Invite Team Member
-      </button>
+      {/* Invite dialog */}
+      {showInvite && (
+        <div className="rounded-lg border border-brand-teal/30 bg-brand-teal/5 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-medium text-brand-navy-900">
+              Invite Team Member
+            </h4>
+            <button
+              onClick={() => {
+                setShowInvite(false);
+                setInviteEmail("");
+                setInviteRole("member");
+                inviteMut.reset();
+              }}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
 
-      <p className="text-xs text-slate-400">
-        Team member invitations coming in Phase 4.
-      </p>
+          <div className="flex gap-2">
+            <input
+              type="email"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              placeholder="teammate@company.com"
+              className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+              onKeyDown={(e) => e.key === "Enter" && handleInvite()}
+            />
+            <select
+              value={inviteRole}
+              onChange={(e) =>
+                setInviteRole(e.target.value as "admin" | "member" | "viewer")
+              }
+              className="rounded-md border border-slate-200 px-2 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+            >
+              <option value="admin">Admin</option>
+              <option value="member">Member</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleInvite}
+              disabled={inviteMut.isPending || !inviteEmail.trim()}
+              className="flex items-center gap-2 rounded-md bg-brand-teal px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {inviteMut.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Users className="h-3.5 w-3.5" />
+              )}
+              Send Invite
+            </button>
+            {inviteMut.error && (
+              <span className="text-xs text-red-500">
+                {inviteMut.error.message}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Members list */}
+      {membersQuery.isLoading ? (
+        <div className="flex items-center gap-2 text-sm text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading team...
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {members.map((member) => {
+            const isPending = !member.acceptedAt && member.role !== "owner";
+            const roleKey = member.role as keyof typeof ROLE_CONFIG;
+            const config = ROLE_CONFIG[roleKey] ?? ROLE_CONFIG.member;
+            const RoleIcon = config.icon;
+            const displayName =
+              member.userName ??
+              member.invitedEmail ??
+              member.userEmail ??
+              "Unknown";
+            const displayEmail =
+              member.userEmail ?? member.invitedEmail ?? "";
+            const initials = (displayName ?? "?")
+              .split(" ")
+              .map((w: string) => w[0])
+              .join("")
+              .slice(0, 2)
+              .toUpperCase();
+
+            return (
+              <div
+                key={member.id}
+                className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"
+              >
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-brand-teal text-xs font-bold text-white">
+                  {member.userImage ? (
+                    <img
+                      src={member.userImage}
+                      alt=""
+                      className="h-9 w-9 rounded-full object-cover"
+                    />
+                  ) : (
+                    initials
+                  )}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium text-brand-navy-900">
+                      {displayName}
+                    </span>
+                    {isPending && (
+                      <span className="flex items-center gap-1 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+                        <Clock className="h-2.5 w-2.5" />
+                        Pending
+                      </span>
+                    )}
+                  </div>
+                  <div className="truncate text-xs text-slate-500">
+                    {displayEmail}
+                  </div>
+                </div>
+
+                {/* Role badge */}
+                <span
+                  className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${config.color}`}
+                >
+                  <RoleIcon className="h-3 w-3" />
+                  {config.label}
+                </span>
+
+                {/* Role changer (non-owner members, only visible to owner) */}
+                {member.role !== "owner" && member.id !== "owner" && (
+                  <select
+                    value={member.role}
+                    onChange={(e) =>
+                      updateRoleMut.mutate({
+                        memberId: member.id,
+                        role: e.target.value as "admin" | "member" | "viewer",
+                      })
+                    }
+                    className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 focus:border-brand-teal focus:outline-none"
+                  >
+                    <option value="admin">Admin</option>
+                    <option value="member">Member</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+                )}
+
+                {/* Remove button (non-owner members only) */}
+                {member.role !== "owner" && member.id !== "owner" && (
+                  <button
+                    onClick={() => removeMut.mutate({ memberId: member.id })}
+                    disabled={removeMut.isPending}
+                    className="rounded p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                    title="Remove member"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {removeMut.error && (
+        <p className="text-xs text-red-500">{removeMut.error.message}</p>
+      )}
+      {updateRoleMut.error && (
+        <p className="text-xs text-red-500">{updateRoleMut.error.message}</p>
+      )}
     </div>
   );
 }

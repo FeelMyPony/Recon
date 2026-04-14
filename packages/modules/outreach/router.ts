@@ -7,7 +7,10 @@ import { outreachEmails } from "./schema/emails";
 import { emailTemplates } from "./schema/templates";
 import { sequences, sequenceSteps } from "./schema/sequences";
 import { workspaces } from "../shared/schema/workspaces";
+import { users } from "../shared/schema/auth";
+import { workspaceMembers } from "../shared/schema/members";
 import { createTRPCRouter, protectedProcedure } from "./trpc";
+import { TRPCError } from "@trpc/server";
 
 export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
@@ -181,6 +184,191 @@ export const outreachRouter = createTRPCRouter({
           ...lead,
           painPoints: [] as string[],
         }));
+      }),
+
+    exportCsv: protectedProcedure
+      .input(
+        z.object({
+          status: z.string().optional(),
+          score: z.string().optional(),
+          search: z.string().optional(),
+        }).optional(),
+      )
+      .query(async ({ ctx, input }) => {
+        const conditions = [eq(leads.workspaceId, ctx.workspaceId)];
+
+        if (input?.status) {
+          conditions.push(eq(leads.status, input.status as any));
+        }
+        if (input?.score) {
+          conditions.push(eq(leads.score, input.score as any));
+        }
+        if (input?.search) {
+          conditions.push(
+            sql`(${leads.name} ILIKE ${`%${input.search}%`} OR ${leads.suburb} ILIKE ${`%${input.search}%`} OR ${leads.category} ILIKE ${`%${input.search}%`})`,
+          );
+        }
+
+        const result = await ctx.db
+          .select()
+          .from(leads)
+          .where(and(...conditions))
+          .orderBy(desc(leads.createdAt));
+
+        // Build CSV
+        const headers = [
+          "Name", "Category", "Suburb", "State", "Postcode",
+          "Rating", "Reviews", "Email", "Phone", "Website",
+          "Status", "Score", "Google Maps URL",
+        ];
+
+        const escapeField = (val: string | number | null | undefined) => {
+          if (val == null) return "";
+          const str = String(val);
+          if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        };
+
+        const rows = result.map((lead) =>
+          [
+            lead.name,
+            lead.category,
+            lead.suburb,
+            lead.state,
+            lead.postcode,
+            lead.rating,
+            lead.reviewCount,
+            lead.email,
+            lead.phone,
+            lead.website,
+            lead.status,
+            lead.score,
+            lead.googleMapsUrl,
+          ]
+            .map(escapeField)
+            .join(","),
+        );
+
+        return [headers.join(","), ...rows].join("\n");
+      }),
+
+    importCsv: protectedProcedure
+      .input(z.object({ csvData: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const lines = input.csvData.split(/\r?\n/).filter((l) => l.trim());
+        if (lines.length < 2) {
+          return { imported: 0, skipped: 0, errors: ["CSV must have a header row and at least one data row"] };
+        }
+
+        // Parse CSV line respecting quoted fields
+        const parseLine = (line: string): string[] => {
+          const fields: string[] = [];
+          let current = "";
+          let inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const ch = line[i]!;
+            if (inQuotes) {
+              if (ch === '"') {
+                if (i + 1 < line.length && line[i + 1] === '"') {
+                  current += '"';
+                  i++;
+                } else {
+                  inQuotes = false;
+                }
+              } else {
+                current += ch;
+              }
+            } else {
+              if (ch === '"') {
+                inQuotes = true;
+              } else if (ch === ",") {
+                fields.push(current.trim());
+                current = "";
+              } else {
+                current += ch;
+              }
+            }
+          }
+          fields.push(current.trim());
+          return fields;
+        };
+
+        const headerRow = parseLine(lines[0]!);
+        const headerMap = new Map<string, number>();
+        headerRow.forEach((h, i) => headerMap.set(h.toLowerCase(), i));
+
+        const col = (row: string[], name: string): string | undefined => {
+          const idx = headerMap.get(name.toLowerCase());
+          if (idx == null) return undefined;
+          const val = row[idx]?.trim();
+          return val || undefined;
+        };
+
+        let imported = 0;
+        let skipped = 0;
+        const errors: string[] = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          const row = parseLine(lines[i]!);
+          const name = col(row, "name");
+
+          if (!name) {
+            skipped++;
+            errors.push(`Row ${i + 1}: missing name, skipped`);
+            continue;
+          }
+
+          const googlePlaceId = col(row, "google_place_id") ?? col(row, "googleplaceid");
+
+          // Check duplicate by google_place_id
+          if (googlePlaceId) {
+            const existing = await ctx.db
+              .select({ id: leads.id })
+              .from(leads)
+              .where(
+                and(
+                  eq(leads.workspaceId, ctx.workspaceId),
+                  eq(leads.googlePlaceId, googlePlaceId),
+                ),
+              )
+              .limit(1);
+
+            if (existing.length > 0) {
+              skipped++;
+              errors.push(`Row ${i + 1}: duplicate google_place_id "${googlePlaceId}", skipped`);
+              continue;
+            }
+          }
+
+          const ratingRaw = col(row, "rating");
+          const reviewCountRaw = col(row, "reviews") ?? col(row, "reviewcount") ?? col(row, "review_count");
+
+          try {
+            await ctx.db.insert(leads).values({
+              workspaceId: ctx.workspaceId,
+              name,
+              category: col(row, "category"),
+              suburb: col(row, "suburb"),
+              state: col(row, "state"),
+              postcode: col(row, "postcode"),
+              rating: ratingRaw ?? null,
+              reviewCount: reviewCountRaw ? parseInt(reviewCountRaw, 10) || 0 : 0,
+              email: col(row, "email"),
+              phone: col(row, "phone"),
+              website: col(row, "website"),
+              googlePlaceId: googlePlaceId ?? null,
+              googleMapsUrl: col(row, "google maps url") ?? col(row, "googlemapsurl") ?? col(row, "google_maps_url"),
+            });
+            imported++;
+          } catch (err: any) {
+            skipped++;
+            errors.push(`Row ${i + 1}: ${err.message ?? "insert failed"}`);
+          }
+        }
+
+        return { imported, skipped, errors };
       }),
 
     updateStatus: protectedProcedure
@@ -825,6 +1013,263 @@ export const outreachRouter = createTRPCRouter({
           .set(patch)
           .where(eq(workspaces.id, ctx.workspaceId))
           .returning();
+        return row;
+      }),
+
+    /** List all members of the current workspace, including pending invites */
+    members: protectedProcedure.query(async ({ ctx }) => {
+      // Get the workspace to know the owner
+      const [ws] = await ctx.db
+        .select({ ownerId: workspaces.ownerId })
+        .from(workspaces)
+        .where(eq(workspaces.id, ctx.workspaceId))
+        .limit(1);
+
+      if (!ws) throw new TRPCError({ code: "NOT_FOUND", message: "Workspace not found" });
+
+      // Fetch all workspace_members rows with joined user info
+      const members = await ctx.db
+        .select({
+          id: workspaceMembers.id,
+          workspaceId: workspaceMembers.workspaceId,
+          userId: workspaceMembers.userId,
+          role: workspaceMembers.role,
+          invitedEmail: workspaceMembers.invitedEmail,
+          invitedAt: workspaceMembers.invitedAt,
+          acceptedAt: workspaceMembers.acceptedAt,
+          createdAt: workspaceMembers.createdAt,
+          userName: users.name,
+          userEmail: users.email,
+          userImage: users.image,
+        })
+        .from(workspaceMembers)
+        .leftJoin(users, eq(workspaceMembers.userId, users.id))
+        .where(eq(workspaceMembers.workspaceId, ctx.workspaceId))
+        .orderBy(workspaceMembers.createdAt);
+
+      // Also include the workspace owner (they may not have a workspace_members row)
+      const [owner] = await ctx.db
+        .select({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          image: users.image,
+        })
+        .from(users)
+        .where(eq(users.id, ws.ownerId))
+        .limit(1);
+
+      const ownerInMembers = members.some(
+        (m) => m.userId === ws.ownerId && m.role === "owner",
+      );
+
+      const result = ownerInMembers
+        ? members
+        : [
+            // Synthesize an owner entry if they don't have a workspace_members row
+            {
+              id: "owner",
+              workspaceId: ctx.workspaceId,
+              userId: ws.ownerId,
+              role: "owner" as const,
+              invitedEmail: null,
+              invitedAt: null,
+              acceptedAt: null,
+              createdAt: null,
+              userName: owner?.name ?? null,
+              userEmail: owner?.email ?? null,
+              userImage: owner?.image ?? null,
+            },
+            ...members,
+          ];
+
+      return result;
+    }),
+
+    /** Invite a user to the workspace by email */
+    invite: protectedProcedure
+      .input(
+        z.object({
+          email: z.string().email().max(255),
+          role: z.enum(["admin", "member", "viewer"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Check that the current user is the workspace owner
+        const [ws] = await ctx.db
+          .select({ ownerId: workspaces.ownerId })
+          .from(workspaces)
+          .where(eq(workspaces.id, ctx.workspaceId))
+          .limit(1);
+
+        if (!ws || ws.ownerId !== ctx.userId) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Only the workspace owner can invite members",
+          });
+        }
+
+        // Check if already invited
+        const [existing] = await ctx.db
+          .select({ id: workspaceMembers.id })
+          .from(workspaceMembers)
+          .where(
+            and(
+              eq(workspaceMembers.workspaceId, ctx.workspaceId),
+              eq(workspaceMembers.invitedEmail, input.email.toLowerCase()),
+            ),
+          )
+          .limit(1);
+
+        if (existing) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "This email has already been invited",
+          });
+        }
+
+        // Check if the user already exists and is already a member
+        const [existingUser] = await ctx.db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.email, input.email.toLowerCase()))
+          .limit(1);
+
+        if (existingUser) {
+          const [alreadyMember] = await ctx.db
+            .select({ id: workspaceMembers.id })
+            .from(workspaceMembers)
+            .where(
+              and(
+                eq(workspaceMembers.workspaceId, ctx.workspaceId),
+                eq(workspaceMembers.userId, existingUser.id),
+              ),
+            )
+            .limit(1);
+
+          if (alreadyMember) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: "This user is already a member of the workspace",
+            });
+          }
+        }
+
+        const [row] = await ctx.db
+          .insert(workspaceMembers)
+          .values({
+            workspaceId: ctx.workspaceId,
+            invitedEmail: input.email.toLowerCase(),
+            role: input.role,
+            // user_id is null until they accept the invite
+          })
+          .returning();
+
+        return row;
+      }),
+
+    /** Remove a member from the workspace */
+    removeMember: protectedProcedure
+      .input(z.object({ memberId: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        // Only owner can remove members
+        const [ws] = await ctx.db
+          .select({ ownerId: workspaces.ownerId })
+          .from(workspaces)
+          .where(eq(workspaces.id, ctx.workspaceId))
+          .limit(1);
+
+        if (!ws || ws.ownerId !== ctx.userId) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Only the workspace owner can remove members",
+          });
+        }
+
+        // Find the member to remove
+        const [member] = await ctx.db
+          .select({ id: workspaceMembers.id, role: workspaceMembers.role, userId: workspaceMembers.userId })
+          .from(workspaceMembers)
+          .where(
+            and(
+              eq(workspaceMembers.id, input.memberId),
+              eq(workspaceMembers.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
+        if (!member) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Member not found" });
+        }
+
+        // Cannot remove the owner
+        if (member.role === "owner" || member.userId === ws.ownerId) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Cannot remove the workspace owner",
+          });
+        }
+
+        await ctx.db
+          .delete(workspaceMembers)
+          .where(eq(workspaceMembers.id, input.memberId));
+
+        return { success: true };
+      }),
+
+    /** Update a member's role */
+    updateRole: protectedProcedure
+      .input(
+        z.object({
+          memberId: z.string(),
+          role: z.enum(["admin", "member", "viewer"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Only owner can change roles
+        const [ws] = await ctx.db
+          .select({ ownerId: workspaces.ownerId })
+          .from(workspaces)
+          .where(eq(workspaces.id, ctx.workspaceId))
+          .limit(1);
+
+        if (!ws || ws.ownerId !== ctx.userId) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Only the workspace owner can change roles",
+          });
+        }
+
+        // Find the member
+        const [member] = await ctx.db
+          .select({ id: workspaceMembers.id, role: workspaceMembers.role, userId: workspaceMembers.userId })
+          .from(workspaceMembers)
+          .where(
+            and(
+              eq(workspaceMembers.id, input.memberId),
+              eq(workspaceMembers.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
+        if (!member) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Member not found" });
+        }
+
+        // Cannot change owner's role
+        if (member.role === "owner" || member.userId === ws.ownerId) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Cannot change the workspace owner's role",
+          });
+        }
+
+        const [row] = await ctx.db
+          .update(workspaceMembers)
+          .set({ role: input.role })
+          .where(eq(workspaceMembers.id, input.memberId))
+          .returning();
+
         return row;
       }),
   }),

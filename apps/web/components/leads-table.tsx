@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import {
   Star,
   Search,
@@ -14,8 +14,10 @@ import {
   Trash2,
   Tag,
   Loader2,
+  Upload,
 } from "lucide-react";
 import { LeadDetail } from "./lead-detail";
+import { CsvImportDialog } from "./csv-import-dialog";
 import { trpc } from "../lib/trpc/client";
 import { SEED_LEADS } from "@recon/outreach/seed-data";
 
@@ -87,12 +89,44 @@ export function LeadsTable() {
   const [scoreFilter, setScoreFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("score");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Fetch leads from tRPC
+  const utils = trpc.useUtils();
   const { data: rawLeads, isLoading } = trpc.outreach.leads.list.useQuery(
     { limit: 100 },
     { retry: false },
   );
+
+  // Export CSV handler
+  const handleExportCsv = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const filters: { status?: string; score?: string; search?: string } = {};
+      if (statusFilter !== "all") filters.status = statusFilter;
+      if (scoreFilter !== "all") filters.score = scoreFilter;
+      if (searchQuery) filters.search = searchQuery;
+
+      const csvString = await utils.outreach.leads.exportCsv.fetch(
+        Object.keys(filters).length > 0 ? filters : undefined,
+      );
+
+      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "recon-leads-export.csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("[leads] CSV export failed:", err);
+    } finally {
+      setIsExporting(false);
+    }
+  }, [statusFilter, scoreFilter, searchQuery, utils]);
 
   // Use tRPC data if available, fall back to seed data
   const allLeads = toTableLeads(
@@ -226,11 +260,28 @@ export function LeadsTable() {
               <button className="rounded p-1 text-brand-teal hover:bg-brand-teal/10" title="Email">
                 <Mail className="h-3 w-3" />
               </button>
-              <button className="rounded p-1 text-brand-teal hover:bg-brand-teal/10" title="Export">
-                <Download className="h-3 w-3" />
+              <button
+                className="rounded p-1 text-brand-teal hover:bg-brand-teal/10"
+                title="Export"
+                onClick={handleExportCsv}
+                disabled={isExporting}
+              >
+                {isExporting ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Download className="h-3 w-3" />
+                )}
               </button>
             </div>
           )}
+
+          <button
+            onClick={() => setShowImportDialog(true)}
+            className="ml-2 flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600 transition-colors hover:bg-slate-100"
+          >
+            <Upload className="h-3 w-3" />
+            Import CSV
+          </button>
 
           <span className="ml-auto text-xs text-slate-400">
             {isLoading ? (
@@ -389,6 +440,16 @@ export function LeadsTable() {
             onClose={() => setSelectedLead(null)}
           />
         </div>
+      )}
+
+      {/* Import CSV dialog */}
+      {showImportDialog && (
+        <CsvImportDialog
+          onClose={() => setShowImportDialog(false)}
+          onImportComplete={() => {
+            utils.outreach.leads.list.invalidate();
+          }}
+        />
       )}
     </div>
   );
