@@ -10,6 +10,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Loader2,
+  Activity,
 } from "lucide-react";
 import { trpc } from "../../../lib/trpc/client";
 
@@ -206,16 +207,112 @@ export default function AnalyticsPage() {
           </div>
         </div>
 
-        {/* Recent activity placeholder */}
-        <div className="rounded-lg border border-slate-200 bg-white p-4">
-          <h3 className="text-sm font-semibold text-brand-navy-900">Recent Activity</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Latest workspace events</p>
-          <div className="mt-3">
-            <p className="py-4 text-center text-xs text-slate-400">
-              Activity feed will populate as you use RECON.
-            </p>
+        {/* Recent activity */}
+        <RecentActivity />
+      </div>
+    </div>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────
+
+function relativeTime(date: Date | string | null | undefined): string {
+  if (!date) return "";
+  const now = Date.now();
+  const then = new Date(date).getTime();
+  const diffSec = Math.max(0, Math.floor((now - then) / 1000));
+
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
+const ACTION_ICON_MAP: Record<string, typeof Activity> = {
+  search_created: TrendingUp,
+  lead_status_changed: Target,
+  email_drafted: Mail,
+  template_created: Mail,
+  member_invited: Users,
+  sequence_created: Activity,
+};
+
+const ACTION_LABEL_MAP: Record<string, string> = {
+  search_created: "Search created",
+  lead_status_changed: "Lead status changed",
+  email_drafted: "Email drafted",
+  template_created: "Template created",
+  member_invited: "Member invited",
+  sequence_created: "Sequence created",
+};
+
+function RecentActivity() {
+  const { data: activities, isLoading: activityLoading } =
+    trpc.outreach.activity.list.useQuery(undefined, { retry: false });
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <h3 className="text-sm font-semibold text-brand-navy-900">Recent Activity</h3>
+      <p className="mt-0.5 text-xs text-slate-500">Latest workspace events</p>
+      <div className="mt-3 space-y-2">
+        {activityLoading && (
+          <div className="flex items-center justify-center py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
           </div>
-        </div>
+        )}
+        {!activityLoading && (!activities || activities.length === 0) && (
+          <p className="py-4 text-center text-xs text-slate-400">
+            Activity feed will populate as you use RECON.
+          </p>
+        )}
+        {activities?.map((item) => {
+          const Icon = ACTION_ICON_MAP[item.action] ?? Activity;
+          const label = ACTION_LABEL_MAP[item.action] ?? item.action;
+          const details = item.details as Record<string, unknown> | null;
+          // Build a short description from details
+          let description = "";
+          if (item.action === "lead_status_changed" && details) {
+            description = `${details.from} → ${details.to}`;
+          } else if (item.action === "search_created" && details) {
+            description = `${details.query} in ${details.location}`;
+          } else if (item.action === "email_drafted" && details) {
+            description = String(details.subject ?? "");
+          } else if (item.action === "template_created" && details) {
+            description = String(details.templateName ?? "");
+          } else if (item.action === "member_invited" && details) {
+            description = `${details.email} as ${details.role}`;
+          } else if (item.action === "sequence_created" && details) {
+            description = String(details.sequenceName ?? "");
+          }
+
+          return (
+            <div
+              key={item.id}
+              className="flex items-start gap-3 rounded-md px-2 py-1.5 hover:bg-slate-50"
+            >
+              <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-teal/10">
+                <Icon className="h-3 w-3 text-brand-teal" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-brand-navy-900">{label}</p>
+                {description && (
+                  <p className="truncate text-[11px] text-slate-500">{description}</p>
+                )}
+              </div>
+              <div className="shrink-0 text-right">
+                <span className="text-[10px] text-slate-400">
+                  {relativeTime(item.createdAt)}
+                </span>
+                {item.userName && (
+                  <p className="text-[10px] text-slate-400">{item.userName}</p>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -19,6 +19,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
+import { EmptyState } from "@/components/empty-state";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -227,9 +228,9 @@ function SequencesList({
   if (sequences.length === 0) {
     return (
       <EmptyState
-        icon={<Mail className="h-8 w-8 text-slate-300" />}
+        icon={Mail}
         title="No sequences yet"
-        description='Click "New Sequence" to create your first drip campaign.'
+        description="Create your first email sequence to automate outreach."
       />
     );
   }
@@ -469,9 +470,9 @@ function TemplatesList({
   if (templates.length === 0) {
     return (
       <EmptyState
-        icon={<Mail className="h-8 w-8 text-slate-300" />}
+        icon={Mail}
         title="No templates yet"
-        description='Click "New Template" to create your first reusable email.'
+        description="Create an email template to start personalising your outreach."
       />
     );
   }
@@ -728,9 +729,9 @@ function EmailsList({
   if (emails.length === 0) {
     return (
       <EmptyState
-        icon={<Send className="h-8 w-8 text-slate-300" />}
+        icon={Send}
         title="No emails sent yet"
-        description="Emails sent via sequences or single-lead compose will appear here."
+        description="Compose an email from a lead's detail panel to get started."
       />
     );
   }
@@ -802,25 +803,6 @@ function EmailsList({
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-function EmptyState({
-  icon,
-  title,
-  description,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-white py-16 text-center">
-      {icon}
-      <h3 className="mt-3 text-sm font-semibold text-brand-navy-900">
-        {title}
-      </h3>
-      <p className="mt-1 max-w-sm text-xs text-slate-500">{description}</p>
-    </div>
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Sequence detail dialog with step management

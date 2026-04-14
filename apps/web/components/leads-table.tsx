@@ -15,9 +15,11 @@ import {
   Tag,
   Loader2,
   Upload,
+  Users,
 } from "lucide-react";
 import { LeadDetail } from "./lead-detail";
 import { CsvImportDialog } from "./csv-import-dialog";
+import { EmptyState } from "./empty-state";
 import { trpc } from "../lib/trpc/client";
 import { SEED_LEADS } from "@recon/outreach/seed-data";
 
@@ -209,6 +211,39 @@ export function LeadsTable() {
       <ChevronDown className="h-3 w-3 text-brand-teal" />
     );
   };
+
+  // Empty state when there are truly no leads from the database
+  if (!isLoading && (!rawLeads || rawLeads.length === 0)) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <EmptyState
+          icon={Users}
+          title="No leads in your workspace"
+          description="Import a CSV or run a Google Maps search to get started."
+          actions={[
+            {
+              label: "Import CSV",
+              onClick: () => setShowImportDialog(true),
+              variant: "secondary",
+            },
+            {
+              label: "New Search",
+              onClick: () => {
+                const btn = document.querySelector<HTMLButtonElement>(
+                  '[data-action="new-search"]',
+                );
+                btn?.click();
+              },
+              variant: "primary",
+            },
+          ]}
+        />
+        {showImportDialog && (
+          <CsvImportDialog onClose={() => setShowImportDialog(false)} />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full">
