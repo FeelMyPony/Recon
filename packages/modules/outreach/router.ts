@@ -357,6 +357,363 @@ export const outreachRouter = createTRPCRouter({
   }),
 
   // ──────────────────────────────────────────────
+  // TEMPLATES
+  // ──────────────────────────────────────────────
+
+  templates: createTRPCRouter({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await ctx.db
+        .select()
+        .from(emailTemplates)
+        .where(eq(emailTemplates.workspaceId, ctx.workspaceId))
+        .orderBy(desc(emailTemplates.updatedAt));
+
+      // Attach "used in N sequences" count
+      if (rows.length === 0) return [];
+      const templateIds = rows.map((t) => t.id);
+      const usage = await ctx.db
+        .select({
+          templateId: sequenceSteps.templateId,
+          cnt: count(),
+        })
+        .from(sequenceSteps)
+        .where(
+          and(
+            eq(sequenceSteps.workspaceId, ctx.workspaceId),
+            sql`${sequenceSteps.templateId} = ANY(${templateIds})`,
+          ),
+        )
+        .groupBy(sequenceSteps.templateId);
+
+      const usageMap = new Map(usage.map((u) => [u.templateId, Number(u.cnt)]));
+      return rows.map((r) => ({ ...r, usedIn: usageMap.get(r.id) ?? 0 }));
+    }),
+
+    create: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(100),
+          subject: z.string().min(1).max(200),
+          body: z.string().min(1).max(10000),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Extract merge fields from subject + body
+        const mergeFieldRegex = /\{\{([\w_]+)\}\}/g;
+        const fields = new Set<string>();
+        for (const m of `${input.subject}\n${input.body}`.matchAll(
+          mergeFieldRegex,
+        )) {
+          fields.add(m[1]!);
+        }
+
+        const [row] = await ctx.db
+          .insert(emailTemplates)
+          .values({
+            workspaceId: ctx.workspaceId,
+            name: input.name,
+            subject: input.subject,
+            body: input.body,
+            mergeFields: Array.from(fields),
+          })
+          .returning();
+        return row;
+      }),
+
+    update: protectedProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          name: z.string().min(1).max(100).optional(),
+          subject: z.string().min(1).max(200).optional(),
+          body: z.string().min(1).max(10000).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...patch } = input;
+
+        // Recompute merge fields if subject or body changed
+        const mergeFieldRegex = /\{\{([\w_]+)\}\}/g;
+        let mergeFields: string[] | undefined;
+        if (patch.subject != null || patch.body != null) {
+          const [existing] = await ctx.db
+            .select({
+              subject: emailTemplates.subject,
+              body: emailTemplates.body,
+            })
+            .from(emailTemplates)
+            .where(
+              and(
+                eq(emailTemplates.id, id),
+                eq(emailTemplates.workspaceId, ctx.workspaceId),
+              ),
+            );
+          const subject = patch.subject ?? existing?.subject ?? "";
+          const body = patch.body ?? existing?.body ?? "";
+          const fields = new Set<string>();
+          for (const m of `${subject}\n${body}`.matchAll(mergeFieldRegex)) {
+            fields.add(m[1]!);
+          }
+          mergeFields = Array.from(fields);
+        }
+
+        const [row] = await ctx.db
+          .update(emailTemplates)
+          .set({
+            ...patch,
+            ...(mergeFields ? { mergeFields } : {}),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(emailTemplates.id, id),
+              eq(emailTemplates.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .returning();
+        return row;
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        await ctx.db
+          .delete(emailTemplates)
+          .where(
+            and(
+              eq(emailTemplates.id, input.id),
+              eq(emailTemplates.workspaceId, ctx.workspaceId),
+            ),
+          );
+        return { success: true };
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
+  // SEQUENCES
+  // ──────────────────────────────────────────────
+
+  sequences: createTRPCRouter({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await ctx.db
+        .select()
+        .from(sequences)
+        .where(eq(sequences.workspaceId, ctx.workspaceId))
+        .orderBy(desc(sequences.updatedAt));
+
+      if (rows.length === 0) return [];
+      const sequenceIds = rows.map((s) => s.id);
+
+      // Step counts
+      const stepCounts = await ctx.db
+        .select({
+          sequenceId: sequenceSteps.sequenceId,
+          cnt: count(),
+        })
+        .from(sequenceSteps)
+        .where(sql`${sequenceSteps.sequenceId} = ANY(${sequenceIds})`)
+        .groupBy(sequenceSteps.sequenceId);
+      const stepMap = new Map(
+        stepCounts.map((s) => [s.sequenceId, Number(s.cnt)]),
+      );
+
+      // Email stats per sequence
+      const emailStats = await ctx.db
+        .select({
+          sequenceId: outreachEmails.sequenceId,
+          status: outreachEmails.status,
+          cnt: count(),
+        })
+        .from(outreachEmails)
+        .where(
+          and(
+            eq(outreachEmails.workspaceId, ctx.workspaceId),
+            sql`${outreachEmails.sequenceId} = ANY(${sequenceIds})`,
+          ),
+        )
+        .groupBy(outreachEmails.sequenceId, outreachEmails.status);
+
+      const statsMap = new Map<
+        string,
+        { sent: number; opened: number; replied: number }
+      >();
+      for (const s of emailStats) {
+        if (!s.sequenceId) continue;
+        const entry = statsMap.get(s.sequenceId) ?? {
+          sent: 0,
+          opened: 0,
+          replied: 0,
+        };
+        const n = Number(s.cnt);
+        if (
+          s.status === "sent" ||
+          s.status === "opened" ||
+          s.status === "replied" ||
+          s.status === "bounced"
+        ) {
+          entry.sent += n;
+        }
+        if (s.status === "opened" || s.status === "replied") entry.opened += n;
+        if (s.status === "replied") entry.replied += n;
+        statsMap.set(s.sequenceId, entry);
+      }
+
+      return rows.map((r) => {
+        const s = statsMap.get(r.id) ?? { sent: 0, opened: 0, replied: 0 };
+        return {
+          ...r,
+          steps: stepMap.get(r.id) ?? 0,
+          sent: s.sent,
+          opened: s.opened,
+          replied: s.replied,
+          openRate: s.sent > 0 ? Math.round((s.opened / s.sent) * 100) : 0,
+          replyRate: s.sent > 0 ? Math.round((s.replied / s.sent) * 100) : 0,
+        };
+      });
+    }),
+
+    create: protectedProcedure
+      .input(z.object({ name: z.string().min(1).max(100) }))
+      .mutation(async ({ ctx, input }) => {
+        const [row] = await ctx.db
+          .insert(sequences)
+          .values({
+            workspaceId: ctx.workspaceId,
+            name: input.name,
+          })
+          .returning();
+        return row;
+      }),
+
+    toggleActive: protectedProcedure
+      .input(z.object({ id: z.string().uuid(), active: z.boolean() }))
+      .mutation(async ({ ctx, input }) => {
+        const [row] = await ctx.db
+          .update(sequences)
+          .set({ active: input.active, updatedAt: new Date() })
+          .where(
+            and(
+              eq(sequences.id, input.id),
+              eq(sequences.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .returning();
+        return row;
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        await ctx.db
+          .delete(sequences)
+          .where(
+            and(
+              eq(sequences.id, input.id),
+              eq(sequences.workspaceId, ctx.workspaceId),
+            ),
+          );
+        return { success: true };
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
+  // EMAILS
+  // ──────────────────────────────────────────────
+
+  emails: createTRPCRouter({
+    list: protectedProcedure
+      .input(
+        z
+          .object({
+            limit: z.number().min(1).max(100).default(50),
+            status: z
+              .enum(["draft", "queued", "sent", "opened", "replied", "bounced"])
+              .optional(),
+          })
+          .optional(),
+      )
+      .query(async ({ ctx, input }) => {
+        const limit = input?.limit ?? 50;
+        const conditions = [eq(outreachEmails.workspaceId, ctx.workspaceId)];
+        if (input?.status) {
+          conditions.push(eq(outreachEmails.status, input.status));
+        }
+
+        const emailRows = await ctx.db
+          .select({
+            id: outreachEmails.id,
+            leadId: outreachEmails.leadId,
+            subject: outreachEmails.subject,
+            toEmail: outreachEmails.toEmail,
+            status: outreachEmails.status,
+            sentAt: outreachEmails.sentAt,
+            createdAt: outreachEmails.createdAt,
+          })
+          .from(outreachEmails)
+          .where(and(...conditions))
+          .orderBy(desc(outreachEmails.createdAt))
+          .limit(limit);
+
+        if (emailRows.length === 0) return [];
+
+        // Attach lead business names
+        const leadIds = Array.from(new Set(emailRows.map((e) => e.leadId)));
+        const leadRows = await ctx.db
+          .select({ id: leads.id, name: leads.name })
+          .from(leads)
+          .where(sql`${leads.id} = ANY(${leadIds})`);
+        const leadNameMap = new Map(leadRows.map((l) => [l.id, l.name]));
+
+        return emailRows.map((e) => ({
+          ...e,
+          businessName: leadNameMap.get(e.leadId) ?? "Unknown",
+        }));
+      }),
+
+    /**
+     * Create a draft email to a lead. Does NOT send.
+     * Uses template body with merge field substitution.
+     */
+    createDraft: protectedProcedure
+      .input(
+        z.object({
+          leadId: z.string().uuid(),
+          subject: z.string().min(1).max(500),
+          body: z.string().min(1).max(50000),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Validate lead belongs to workspace and has an email
+        const [lead] = await ctx.db
+          .select({ id: leads.id, email: leads.email })
+          .from(leads)
+          .where(
+            and(
+              eq(leads.id, input.leadId),
+              eq(leads.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
+        if (!lead) throw new Error("Lead not found in workspace");
+        if (!lead.email) throw new Error("Lead has no email address");
+
+        const [row] = await ctx.db
+          .insert(outreachEmails)
+          .values({
+            leadId: input.leadId,
+            workspaceId: ctx.workspaceId,
+            subject: input.subject,
+            body: input.body,
+            toEmail: lead.email,
+            status: "draft",
+          })
+          .returning();
+        return row;
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
   // STATS
   // ──────────────────────────────────────────────
 

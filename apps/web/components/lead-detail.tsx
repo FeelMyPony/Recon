@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import {
   X,
   Star,
@@ -8,7 +9,10 @@ import {
   Phone,
   Sparkles,
   Target,
+  Loader2,
+  CheckCircle2,
 } from "lucide-react";
+import { trpc } from "@/lib/trpc/client";
 
 const STATUS_CONFIG = {
   new: { label: "New", classes: "bg-slate-100 text-slate-700", dot: "bg-slate-400" },
@@ -52,6 +56,7 @@ export function LeadDetail({
 }) {
   const st = STATUS_CONFIG[lead.status];
   const sc = SCORE_CONFIG[lead.score];
+  const [showCompose, setShowCompose] = useState(false);
 
   return (
     <div className="flex h-full flex-col bg-white">
@@ -74,7 +79,6 @@ export function LeadDetail({
       </div>
 
       <div className="scrollbar-thin flex-1 overflow-y-auto">
-        {/* Status + Score */}
         <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-3">
           <span
             className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${st.classes}`}
@@ -87,7 +91,6 @@ export function LeadDetail({
           </span>
         </div>
 
-        {/* Quick stats */}
         <div className="grid grid-cols-3 divide-x divide-slate-100 border-b border-slate-100 px-4 py-3">
           <div className="text-center">
             <div className="flex items-center justify-center gap-1 text-amber-500">
@@ -116,7 +119,6 @@ export function LeadDetail({
           </div>
         </div>
 
-        {/* Contact details */}
         <div className="space-y-2 border-b border-slate-100 px-4 py-3">
           <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             Contact
@@ -139,9 +141,13 @@ export function LeadDetail({
               <span className="text-brand-navy-900">{lead.website}</span>
             </div>
           )}
+          {!lead.email && !lead.phone && !lead.website && (
+            <p className="text-xs italic text-slate-400">
+              No contact details captured yet.
+            </p>
+          )}
         </div>
 
-        {/* AI Pain Points */}
         {lead.painPoints.length > 0 && (
           <div className="border-b border-slate-100 px-4 py-3">
             <div className="mb-2 flex items-center gap-1.5">
@@ -164,13 +170,202 @@ export function LeadDetail({
           </div>
         )}
 
-        {/* Actions */}
         <div className="space-y-2 px-4 py-3">
-          <button className="flex w-full items-center justify-center gap-2 rounded-md bg-brand-teal px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600">
-            <Sparkles className="h-4 w-4" /> Generate Outreach Email
+          <button
+            onClick={() => setShowCompose(true)}
+            disabled={!lead.email}
+            className="flex w-full items-center justify-center gap-2 rounded-md bg-brand-teal px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Sparkles className="h-4 w-4" />{" "}
+            {lead.email ? "Compose Outreach Email" : "No email address"}
           </button>
-          <button className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-brand-navy-900 transition-colors hover:bg-slate-50">
-            <Target className="h-4 w-4" /> Analyse Reviews
+          <button
+            disabled
+            className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-slate-400"
+            title="Coming soon"
+          >
+            <Target className="h-4 w-4" /> Analyse Reviews (coming soon)
+          </button>
+        </div>
+      </div>
+
+      {showCompose && lead.email && (
+        <ComposeEmailDialog
+          lead={lead}
+          onClose={() => setShowCompose(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Compose Email Dialog
+// ─────────────────────────────────────────────────────────────────────────
+
+function ComposeEmailDialog({
+  lead,
+  onClose,
+}: {
+  lead: Lead;
+  onClose: () => void;
+}) {
+  const templatesQuery = trpc.outreach.templates.list.useQuery();
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | "">("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const utils = trpc.useUtils();
+  const createDraft = trpc.outreach.emails.createDraft.useMutation({
+    onSuccess: () => {
+      utils.outreach.emails.list.invalidate();
+      setSaved(true);
+      setTimeout(onClose, 1200);
+    },
+  });
+
+  // Build merge-field map from lead data
+  const mergeMap = useMemo(
+    () => ({
+      business_name: lead.name,
+      contact_name: "there",
+      category: lead.category,
+      suburb: lead.suburb,
+      rating: lead.rating,
+      pain_point: lead.painPoints[0] ?? "the feedback in your reviews",
+    }),
+    [lead],
+  );
+
+  const applyMerge = (s: string): string =>
+    s.replace(/\{\{([\w_]+)\}\}/g, (_, key) =>
+      String(mergeMap[key as keyof typeof mergeMap] ?? `{{${key}}}`),
+    );
+
+  const handleTemplateChange = (id: string) => {
+    setSelectedTemplateId(id);
+    if (!id) {
+      setSubject("");
+      setBody("");
+      return;
+    }
+    const tmpl = templatesQuery.data?.find((t) => t.id === id);
+    if (tmpl) {
+      setSubject(applyMerge(tmpl.subject));
+      setBody(applyMerge(tmpl.body));
+    }
+  };
+
+  const canSave =
+    subject.trim().length > 0 &&
+    body.trim().length > 0 &&
+    !createDraft.isPending &&
+    !saved;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-brand-navy-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-2xl overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-brand-navy-900">
+              Compose Email
+            </h2>
+            <p className="text-xs text-slate-500">
+              To: <span className="text-brand-navy-900">{lead.email}</span> ·{" "}
+              {lead.name}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-slate-400 hover:bg-slate-100"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-5">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Start from template (optional)
+            </label>
+            <select
+              value={selectedTemplateId}
+              onChange={(e) => handleTemplateChange(e.target.value)}
+              disabled={templatesQuery.isLoading}
+              className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+            >
+              <option value="">— Write from scratch —</option>
+              {(templatesQuery.data ?? []).map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Subject
+            </label>
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="e.g., Quick question about your NDIS practice"
+              className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Body
+            </label>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={10}
+              placeholder="Write your email here..."
+              className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+            />
+          </div>
+
+          {createDraft.error && (
+            <div className="rounded-md bg-red-50 p-2.5 text-xs text-red-600">
+              {createDraft.error.message}
+            </div>
+          )}
+
+          {saved && (
+            <div className="flex items-center gap-2 rounded-md bg-emerald-50 p-2.5 text-xs text-emerald-700">
+              <CheckCircle2 className="h-4 w-4" />
+              Draft saved. You can send it from Outreach → Sent Emails.
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 text-sm text-slate-500"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() =>
+              createDraft.mutate({
+                leadId: lead.id,
+                subject: subject.trim(),
+                body: body.trim(),
+              })
+            }
+            disabled={!canSave}
+            className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {createDraft.isPending && (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            )}
+            Save as Draft
           </button>
         </div>
       </div>
