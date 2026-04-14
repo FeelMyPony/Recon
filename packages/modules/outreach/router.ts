@@ -6,6 +6,7 @@ import { searches } from "./schema/searches";
 import { outreachEmails } from "./schema/emails";
 import { emailTemplates } from "./schema/templates";
 import { sequences, sequenceSteps } from "./schema/sequences";
+import { workspaces } from "../shared/schema/workspaces";
 import { createTRPCRouter, protectedProcedure } from "./trpc";
 
 export const outreachRouter = createTRPCRouter({
@@ -613,6 +614,218 @@ export const outreachRouter = createTRPCRouter({
             ),
           );
         return { success: true };
+      }),
+
+    /**
+     * Get a sequence with its steps ordered by step_number.
+     * Each step is hydrated with its template for client-side rendering.
+     */
+    getById: protectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        const [sequence] = await ctx.db
+          .select()
+          .from(sequences)
+          .where(
+            and(
+              eq(sequences.id, input.id),
+              eq(sequences.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+        if (!sequence) return null;
+
+        const steps = await ctx.db
+          .select({
+            id: sequenceSteps.id,
+            stepNumber: sequenceSteps.stepNumber,
+            templateId: sequenceSteps.templateId,
+            delayDays: sequenceSteps.delayDays,
+            aiGenerate: sequenceSteps.aiGenerate,
+            templateName: emailTemplates.name,
+            templateSubject: emailTemplates.subject,
+          })
+          .from(sequenceSteps)
+          .leftJoin(
+            emailTemplates,
+            eq(sequenceSteps.templateId, emailTemplates.id),
+          )
+          .where(eq(sequenceSteps.sequenceId, input.id))
+          .orderBy(sequenceSteps.stepNumber);
+
+        return { ...sequence, steps };
+      }),
+
+    addStep: protectedProcedure
+      .input(
+        z.object({
+          sequenceId: z.string().uuid(),
+          templateId: z.string().uuid(),
+          delayDays: z.number().int().min(0).max(90).default(0),
+          aiGenerate: z.boolean().default(false),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Verify sequence belongs to workspace
+        const [seq] = await ctx.db
+          .select({ id: sequences.id })
+          .from(sequences)
+          .where(
+            and(
+              eq(sequences.id, input.sequenceId),
+              eq(sequences.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+        if (!seq) throw new Error("Sequence not found");
+
+        // Verify template belongs to workspace
+        const [tmpl] = await ctx.db
+          .select({ id: emailTemplates.id })
+          .from(emailTemplates)
+          .where(
+            and(
+              eq(emailTemplates.id, input.templateId),
+              eq(emailTemplates.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+        if (!tmpl) throw new Error("Template not found");
+
+        // Next step number = count + 1
+        const countRows = await ctx.db
+          .select({ cnt: count() })
+          .from(sequenceSteps)
+          .where(eq(sequenceSteps.sequenceId, input.sequenceId));
+        const existingCount = Number(countRows[0]?.cnt ?? 0);
+
+        const [row] = await ctx.db
+          .insert(sequenceSteps)
+          .values({
+            sequenceId: input.sequenceId,
+            workspaceId: ctx.workspaceId,
+            stepNumber: existingCount + 1,
+            templateId: input.templateId,
+            delayDays: input.delayDays,
+            aiGenerate: input.aiGenerate,
+          })
+          .returning();
+
+        // Touch parent sequence so list ordering reflects recency
+        await ctx.db
+          .update(sequences)
+          .set({ updatedAt: new Date() })
+          .where(eq(sequences.id, input.sequenceId));
+
+        return row;
+      }),
+
+    updateStep: protectedProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          templateId: z.string().uuid().optional(),
+          delayDays: z.number().int().min(0).max(90).optional(),
+          aiGenerate: z.boolean().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...patch } = input;
+        const [row] = await ctx.db
+          .update(sequenceSteps)
+          .set(patch)
+          .where(
+            and(
+              eq(sequenceSteps.id, id),
+              eq(sequenceSteps.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .returning();
+        return row;
+      }),
+
+    removeStep: protectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        const [removed] = await ctx.db
+          .delete(sequenceSteps)
+          .where(
+            and(
+              eq(sequenceSteps.id, input.id),
+              eq(sequenceSteps.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .returning();
+        if (!removed) return { success: false };
+
+        // Renumber remaining steps in the same sequence
+        const remaining = await ctx.db
+          .select({ id: sequenceSteps.id, stepNumber: sequenceSteps.stepNumber })
+          .from(sequenceSteps)
+          .where(eq(sequenceSteps.sequenceId, removed.sequenceId))
+          .orderBy(sequenceSteps.stepNumber);
+
+        for (let i = 0; i < remaining.length; i++) {
+          const target = i + 1;
+          if (remaining[i]!.stepNumber !== target) {
+            await ctx.db
+              .update(sequenceSteps)
+              .set({ stepNumber: target })
+              .where(eq(sequenceSteps.id, remaining[i]!.id));
+          }
+        }
+        return { success: true };
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
+  // WORKSPACE
+  // ──────────────────────────────────────────────
+
+  workspace: createTRPCRouter({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const [ws] = await ctx.db
+        .select()
+        .from(workspaces)
+        .where(eq(workspaces.id, ctx.workspaceId))
+        .limit(1);
+      return ws ?? null;
+    }),
+
+    update: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(100).optional(),
+          settings: z
+            .object({
+              serviceDescription: z.string().max(2000).optional(),
+              targetCategories: z.array(z.string().max(80)).max(20).optional(),
+              defaultLocation: z.string().max(200).optional(),
+            })
+            .optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const patch: Record<string, unknown> = { updatedAt: new Date() };
+        if (input.name != null) patch.name = input.name;
+        if (input.settings != null) {
+          // Merge into existing settings rather than replacing
+          const [existing] = await ctx.db
+            .select({ settings: workspaces.settings })
+            .from(workspaces)
+            .where(eq(workspaces.id, ctx.workspaceId))
+            .limit(1);
+          patch.settings = {
+            ...(existing?.settings ?? {}),
+            ...input.settings,
+          };
+        }
+        const [row] = await ctx.db
+          .update(workspaces)
+          .set(patch)
+          .where(eq(workspaces.id, ctx.workspaceId))
+          .returning();
+        return row;
       }),
   }),
 

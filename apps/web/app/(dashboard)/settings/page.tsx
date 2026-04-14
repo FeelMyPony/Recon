@@ -1,18 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Building2,
   Key,
   Users,
   Bell,
-  Palette,
-  Globe,
   Save,
-  ExternalLink,
-  Copy,
   CheckCircle2,
+  Loader2,
 } from "lucide-react";
+import { trpc } from "@/lib/trpc/client";
 
 type SettingsTab = "workspace" | "api" | "team" | "notifications";
 
@@ -63,74 +61,200 @@ export default function SettingsPage() {
 }
 
 function WorkspaceSettings() {
+  const wsQuery = trpc.outreach.workspace.get.useQuery();
+  const utils = trpc.useUtils();
+  const updateMut = trpc.outreach.workspace.update.useMutation({
+    onSuccess: () => {
+      utils.outreach.workspace.get.invalidate();
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 2000);
+    },
+  });
+
+  const [name, setName] = useState("");
+  const [serviceDescription, setServiceDescription] = useState("");
+  const [targetCategories, setTargetCategories] = useState("");
+  const [defaultLocation, setDefaultLocation] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  // Hydrate form from fetched workspace once
+  useEffect(() => {
+    if (!hydrated && wsQuery.data) {
+      setName(wsQuery.data.name ?? "");
+      const s = wsQuery.data.settings ?? {};
+      setServiceDescription(s.serviceDescription ?? "");
+      setTargetCategories((s.targetCategories ?? []).join(", "));
+      setDefaultLocation(s.defaultLocation ?? "");
+      setHydrated(true);
+    }
+  }, [wsQuery.data, hydrated]);
+
+  const handleSave = () => {
+    const categories = targetCategories
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0);
+
+    updateMut.mutate({
+      name: name.trim() || undefined,
+      settings: {
+        serviceDescription: serviceDescription.trim(),
+        targetCategories: categories,
+        defaultLocation: defaultLocation.trim(),
+      },
+    });
+  };
+
+  const isLoading = wsQuery.isLoading;
+
   return (
     <div className="max-w-xl space-y-6">
       <div>
-        <h3 className="text-base font-semibold text-brand-navy-900">Workspace</h3>
+        <h3 className="text-base font-semibold text-brand-navy-900">
+          Workspace
+        </h3>
         <p className="mt-0.5 text-xs text-slate-500">
           Manage your workspace settings and preferences
         </p>
       </div>
 
-      <div className="space-y-4">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Workspace Name</label>
-          <input
-            type="text"
-            defaultValue="My Workspace"
-            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
-          />
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-sm text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading workspace...
         </div>
+      ) : (
+        <>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">
+                Workspace Name
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+              />
+            </div>
 
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Service Description</label>
-          <textarea
-            rows={3}
-            defaultValue=""
-            placeholder="Describe your service offering. This helps AI generate more relevant outreach emails."
-            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
-          />
-          <p className="mt-1 text-[10px] text-slate-400">
-            Used by AI when generating personalised outreach content
-          </p>
-        </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">
+                Service Description
+              </label>
+              <textarea
+                rows={3}
+                value={serviceDescription}
+                onChange={(e) => setServiceDescription(e.target.value)}
+                placeholder="Describe your service offering. This helps AI generate more relevant outreach emails."
+                className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+              />
+              <p className="mt-1 text-[10px] text-slate-400">
+                Used by the LLM when generating personalised outreach content
+              </p>
+            </div>
 
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Target Categories</label>
-          <input
-            type="text"
-            defaultValue="NDIS Provider, Physiotherapist, Allied Health"
-            placeholder="Comma-separated categories"
-            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
-          />
-        </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">
+                Target Categories
+              </label>
+              <input
+                type="text"
+                value={targetCategories}
+                onChange={(e) => setTargetCategories(e.target.value)}
+                placeholder="NDIS Provider, Traffic Management, Construction"
+                className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+              />
+              <p className="mt-1 text-[10px] text-slate-400">
+                Comma-separated. Used to bias scoring toward preferred verticals.
+              </p>
+            </div>
 
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Default Search Location</label>
-          <input
-            type="text"
-            defaultValue="Melbourne VIC"
-            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
-          />
-        </div>
-      </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">
+                Default Search Location
+              </label>
+              <input
+                type="text"
+                value={defaultLocation}
+                onChange={(e) => setDefaultLocation(e.target.value)}
+                placeholder="Melbourne VIC"
+                className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
+              />
+            </div>
+          </div>
 
-      <button className="flex items-center gap-2 rounded-md bg-brand-teal px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600">
-        <Save className="h-4 w-4" />
-        Save Changes
-      </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSave}
+              disabled={updateMut.isPending}
+              className="flex items-center gap-2 rounded-md bg-brand-teal px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {updateMut.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4" />
+              )}
+              Save Changes
+            </button>
+            {savedFlash && (
+              <span className="flex items-center gap-1 text-xs text-emerald-600">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Saved
+              </span>
+            )}
+            {updateMut.error && (
+              <span className="text-xs text-red-500">
+                {updateMut.error.message}
+              </span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 function ApiKeysSettings() {
-  const [copied, setCopied] = useState<string | null>(null);
+  // NEXT_PUBLIC_* is the only browser-accessible key we can check from the
+  // client. Server-only keys are inspected on the server.
+  const configured = {
+    NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: Boolean(
+      process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY,
+    ),
+  };
 
   const keys = [
-    { name: "Outscraper API Key", envVar: "OUTSCRAPER_API_KEY", configured: false },
-    { name: "Anthropic API Key", envVar: "ANTHROPIC_API_KEY", configured: false },
-    { name: "Mapbox Token", envVar: "NEXT_PUBLIC_MAPBOX_TOKEN", configured: false },
-    { name: "Google OAuth", envVar: "AUTH_GOOGLE_ID", configured: false },
+    {
+      name: "Google Maps API Key",
+      envVar: "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY",
+      configured: configured.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY,
+      description: "Browser-facing key for map display",
+    },
+    {
+      name: "Outscraper API Key",
+      envVar: "OUTSCRAPER_API_KEY",
+      configured: null,
+      description: "Server-side, used by local scraper worker",
+    },
+    {
+      name: "LM Studio endpoint",
+      envVar: "LM_STUDIO_BASE_URL",
+      configured: null,
+      description: "Local Gemma scoring. Default http://localhost:1234/v1",
+    },
+    {
+      name: "Anthropic API Key",
+      envVar: "ANTHROPIC_API_KEY",
+      configured: null,
+      description: "Claude. For review analysis (not yet wired)",
+    },
+    {
+      name: "Google OAuth",
+      envVar: "AUTH_GOOGLE_ID",
+      configured: null,
+      description: "Sign-in. You're already logged in so this works.",
+    },
   ];
 
   return (
@@ -149,23 +273,44 @@ function ApiKeysSettings() {
             className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
           >
             <div className="flex items-center gap-3">
-              <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${key.configured ? "bg-emerald-50" : "bg-slate-100"}`}>
-                <Key className={`h-4 w-4 ${key.configured ? "text-emerald-500" : "text-slate-400"}`} />
+              <div
+                className={`flex h-8 w-8 items-center justify-center rounded-lg ${
+                  key.configured === true ? "bg-emerald-50" : "bg-slate-100"
+                }`}
+              >
+                <Key
+                  className={`h-4 w-4 ${
+                    key.configured === true
+                      ? "text-emerald-500"
+                      : "text-slate-400"
+                  }`}
+                />
               </div>
               <div>
-                <div className="text-sm font-medium text-brand-navy-900">{key.name}</div>
-                <div className="mt-0.5 font-mono text-[10px] text-slate-400">{key.envVar}</div>
+                <div className="text-sm font-medium text-brand-navy-900">
+                  {key.name}
+                </div>
+                <div className="mt-0.5 font-mono text-[10px] text-slate-400">
+                  {key.envVar}
+                </div>
+                <div className="mt-0.5 text-[10px] text-slate-500">
+                  {key.description}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {key.configured ? (
+              {key.configured === true ? (
                 <span className="flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-600">
                   <CheckCircle2 className="h-3 w-3" />
                   Configured
                 </span>
-              ) : (
+              ) : key.configured === false ? (
                 <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-600">
                   Not Set
+                </span>
+              ) : (
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                  Server only
                 </span>
               )}
             </div>
