@@ -39,11 +39,13 @@ export async function generateCompletion(
     lmStudioTimeout = 5000,
   } = options;
 
-  // 1. Try local LLM first (LM Studio OR Ollama — both expose OpenAI-compatible APIs)
-  //    Priority: explicit LOCAL_LLM_BASE_URL > Ollama (default port) > LM Studio (default port)
+  // 1. Try local LLM first (LM Studio OR Ollama — both expose OpenAI-compatible APIs).
+  //    Priority order:
+  //      a. LOCAL_LLM_BASE_URL (explicit override) — always first
+  //      b. Whichever of LM_STUDIO_BASE_URL / OLLAMA_BASE_URL is explicitly set
+  //      c. If NEITHER is set, try both defaults (Ollama first, then LM Studio)
   const localCandidates: Array<{ url: string; model: string; label: string }> = [];
 
-  // Explicit override (user-configured)
   if (process.env.LOCAL_LLM_BASE_URL) {
     localCandidates.push({
       url: process.env.LOCAL_LLM_BASE_URL,
@@ -52,21 +54,36 @@ export async function generateCompletion(
     });
   }
 
-  // Ollama (default port 11434)
-  if (process.env.OLLAMA_BASE_URL || !process.env.LOCAL_LLM_BASE_URL) {
+  const hasExplicitOllama = !!process.env.OLLAMA_BASE_URL;
+  const hasExplicitLmStudio = !!process.env.LM_STUDIO_BASE_URL;
+
+  if (hasExplicitLmStudio) {
     localCandidates.push({
-      url: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+      url: process.env.LM_STUDIO_BASE_URL!,
+      model: process.env.LM_STUDIO_MODEL ?? "google/gemma-3-4b-it",
+      label: "lm-studio",
+    });
+  }
+
+  if (hasExplicitOllama) {
+    localCandidates.push({
+      url: process.env.OLLAMA_BASE_URL!,
       model: process.env.OLLAMA_MODEL ?? "gemma3:4b",
       label: "ollama",
     });
   }
 
-  // LM Studio (default port 1234)
-  if (process.env.LM_STUDIO_BASE_URL) {
+  // If user hasn't configured anything locally, try both default ports as a last resort
+  if (!hasExplicitOllama && !hasExplicitLmStudio && !process.env.LOCAL_LLM_BASE_URL) {
     localCandidates.push({
-      url: process.env.LM_STUDIO_BASE_URL,
+      url: "http://localhost:11434/v1",
+      model: process.env.OLLAMA_MODEL ?? "gemma3:4b",
+      label: "ollama-default",
+    });
+    localCandidates.push({
+      url: "http://localhost:1234/v1",
       model: process.env.LM_STUDIO_MODEL ?? "google/gemma-3-4b-it",
-      label: "lm-studio",
+      label: "lm-studio-default",
     });
   }
 
