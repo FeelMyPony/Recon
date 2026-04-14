@@ -170,6 +170,9 @@ export function LeadDetail({
           </div>
         )}
 
+        {/* AI Analysis (fetched from DB) */}
+        <LeadAnalysisSection leadId={lead.id} />
+
         <div className="space-y-2 px-4 py-3">
           <button
             onClick={() => setShowCompose(true)}
@@ -179,13 +182,6 @@ export function LeadDetail({
             <Sparkles className="h-4 w-4" />{" "}
             {lead.email ? "Compose Outreach Email" : "No email address"}
           </button>
-          <button
-            disabled
-            className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-slate-400"
-            title="Coming soon"
-          >
-            <Target className="h-4 w-4" /> Analyse Reviews (coming soon)
-          </button>
         </div>
       </div>
 
@@ -194,6 +190,106 @@ export function LeadDetail({
           lead={lead}
           onClose={() => setShowCompose(false)}
         />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI Analysis Section (fetches from review_analyses table)
+// ─────────────────────────────────────────────────────────────────────────
+
+function LeadAnalysisSection({ leadId }: { leadId: string }) {
+  const { data: fullLead, isLoading } = trpc.outreach.leads.getById.useQuery(
+    { id: leadId },
+    { retry: false, staleTime: 60_000 },
+  );
+
+  const analysis = fullLead?.latestAnalysis;
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-3 text-xs text-slate-400">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Loading analysis...
+      </div>
+    );
+  }
+
+  if (!analysis) return null;
+
+  return (
+    <div className="border-b border-slate-100 px-4 py-3">
+      <div className="mb-2 flex items-center gap-1.5">
+        <Target className="h-4 w-4 text-brand-teal" />
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          AI Review Analysis
+        </h4>
+      </div>
+
+      {/* Summary */}
+      {analysis.summary && (
+        <p className="mb-2 text-xs leading-relaxed text-slate-600">
+          {analysis.summary}
+        </p>
+      )}
+
+      {/* Strengths */}
+      {Array.isArray(analysis.strengths) && analysis.strengths.length > 0 && (
+        <div className="mb-1.5">
+          <span className="text-[10px] font-semibold uppercase text-emerald-600">
+            Strengths
+          </span>
+          <div className="mt-0.5 space-y-0.5">
+            {(analysis.strengths as string[]).map((s, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600">
+                <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-400" />
+                {s}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Weaknesses */}
+      {Array.isArray(analysis.weaknesses) && analysis.weaknesses.length > 0 && (
+        <div className="mb-1.5">
+          <span className="text-[10px] font-semibold uppercase text-red-500">
+            Weaknesses
+          </span>
+          <div className="mt-0.5 space-y-0.5">
+            {(analysis.weaknesses as string[]).map((w, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600">
+                <span className="mt-0.5 text-[10px] text-red-400">!</span>
+                {w}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Opportunities */}
+      {Array.isArray(analysis.opportunities) && analysis.opportunities.length > 0 && (
+        <div>
+          <span className="text-[10px] font-semibold uppercase text-blue-500">
+            Opportunities
+          </span>
+          <div className="mt-0.5 space-y-0.5">
+            {(analysis.opportunities as string[]).map((o, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600">
+                <Sparkles className="mt-0.5 h-3 w-3 flex-shrink-0 text-blue-400" />
+                {o}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* AI rationale */}
+      {analysis.aiRationale && (
+        <div className="mt-2 rounded-md bg-slate-50 px-2 py-1.5 text-[10px] text-slate-500">
+          <strong>Score rationale:</strong> {analysis.aiRationale}
+        </div>
       )}
     </div>
   );

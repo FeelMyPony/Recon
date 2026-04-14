@@ -10,6 +10,7 @@ import {
 import {
   Circle,
   Loader2,
+  Map as MapIcon,
   MapPin,
   Pencil,
   Plus,
@@ -17,6 +18,7 @@ import {
   Target,
   X,
 } from "lucide-react";
+import { EmptyState } from "./empty-state";
 // ─────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────
@@ -535,6 +537,26 @@ export function MapView() {
 
   if (!apiKey) {
     return <FallbackMap leads={toMapLeads(leadsQuery.data)} />;
+  }
+
+  // Empty state — show when query has loaded and there are no leads at all
+  if (!leadsQuery.isLoading && activeLeads.length === 0 && drawMode === "none") {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-950">
+        <EmptyState
+          icon={MapIcon}
+          title="No leads yet"
+          description="Run your first search to see leads plotted on the map."
+          actionLabel="New Search"
+          onAction={() => {
+            const btn = document.querySelector<HTMLButtonElement>(
+              '[data-action="new-search"]',
+            );
+            btn?.click();
+          }}
+        />
+      </div>
+    );
   }
 
   return (

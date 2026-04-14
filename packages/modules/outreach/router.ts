@@ -9,6 +9,7 @@ import { sequences, sequenceSteps } from "./schema/sequences";
 import { workspaces } from "../shared/schema/workspaces";
 import { users } from "../shared/schema/auth";
 import { workspaceMembers } from "../shared/schema/members";
+import { activityLog } from "../shared/schema/activity";
 import { createTRPCRouter, protectedProcedure } from "./trpc";
 import { TRPCError } from "@trpc/server";
 
@@ -386,6 +387,18 @@ export const outreachRouter = createTRPCRouter({
         }),
       )
       .mutation(async ({ ctx, input }) => {
+        // Fetch old status before updating
+        const [existing] = await ctx.db
+          .select({ status: leads.status })
+          .from(leads)
+          .where(
+            and(
+              eq(leads.id, input.id),
+              eq(leads.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
         const [updated] = await ctx.db
           .update(leads)
           .set({ status: input.status, updatedAt: new Date() })
@@ -396,6 +409,18 @@ export const outreachRouter = createTRPCRouter({
             ),
           )
           .returning();
+
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            leadId: input.id,
+            action: "lead_status_changed",
+            details: { leadId: input.id, from: existing?.status ?? "unknown", to: input.status },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log lead_status_changed:", e);
+        }
 
         return updated;
       }),
@@ -447,6 +472,17 @@ export const outreachRouter = createTRPCRouter({
         } catch (err) {
           // Event bus may not be initialised in dev — log and continue
           console.warn("[outreach] Failed to emit search.created event:", err);
+        }
+
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: "search_created",
+            details: { query: input.query, location: input.location },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log search_created:", e);
         }
 
         return search;
@@ -606,6 +642,18 @@ export const outreachRouter = createTRPCRouter({
             mergeFields: Array.from(fields),
           })
           .returning();
+
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: "template_created",
+            details: { templateName: input.name },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log template_created:", e);
+        }
+
         return row;
       }),
 
@@ -771,6 +819,18 @@ export const outreachRouter = createTRPCRouter({
             name: input.name,
           })
           .returning();
+
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: "sequence_created",
+            details: { sequenceName: input.name },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log sequence_created:", e);
+        }
+
         return row;
       }),
 
@@ -1165,6 +1225,17 @@ export const outreachRouter = createTRPCRouter({
           })
           .returning();
 
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: "member_invited",
+            details: { email: input.email.toLowerCase(), role: input.role },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log member_invited:", e);
+        }
+
         return row;
       }),
 
@@ -1365,6 +1436,66 @@ export const outreachRouter = createTRPCRouter({
             body: input.body,
             toEmail: lead.email,
             status: "draft",
+          })
+          .returning();
+
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            leadId: input.leadId,
+            action: "email_drafted",
+            details: { leadId: input.leadId, subject: input.subject },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log email_drafted:", e);
+        }
+
+        return row;
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
+  // ACTIVITY
+  // ──────────────────────────────────────────────
+
+  activity: createTRPCRouter({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await ctx.db
+        .select({
+          id: activityLog.id,
+          action: activityLog.action,
+          details: activityLog.details,
+          createdAt: activityLog.createdAt,
+          leadId: activityLog.leadId,
+          userName: users.name,
+        })
+        .from(activityLog)
+        .leftJoin(users, eq(activityLog.userId, users.id))
+        .where(eq(activityLog.workspaceId, ctx.workspaceId))
+        .orderBy(desc(activityLog.createdAt))
+        .limit(20);
+
+      return rows;
+    }),
+
+    log: protectedProcedure
+      .input(
+        z.object({
+          action: z.string().min(1).max(100),
+          details: z.record(z.unknown()).optional(),
+          leadId: z.string().uuid().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const [row] = await ctx.db
+          .insert(activityLog)
+          .values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: input.action,
+            details: input.details ?? {},
+            leadId: input.leadId,
           })
           .returning();
         return row;

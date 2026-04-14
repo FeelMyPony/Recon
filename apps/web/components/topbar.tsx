@@ -40,6 +40,7 @@ export function Topbar() {
         </div>
 
         <button
+          data-action="new-search"
           onClick={() => setShowSearch(true)}
           className="flex items-center gap-2 rounded-md bg-brand-teal px-3 py-1.5 text-sm font-medium text-brand-navy-900 transition-colors hover:bg-brand-teal-600"
         >
