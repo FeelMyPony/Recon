@@ -182,6 +182,7 @@ export function LeadDetail({
             <Sparkles className="h-4 w-4" />{" "}
             {lead.email ? "Compose Outreach Email" : "No email address"}
           </button>
+          <PitchPageButton leadId={lead.id} leadName={lead.name} />
         </div>
       </div>
 
@@ -296,6 +297,69 @@ function LeadAnalysisSection({ leadId }: { leadId: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Pitch Page Button
+// ─────────────────────────────────────────────────────────────────────────
+
+function PitchPageButton({ leadId, leadName }: { leadId: string; leadName: string }) {
+  const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
+
+  const existingPages = trpc.outreach.pitchPages.getByLead.useQuery(
+    { leadId },
+    { retry: false, staleTime: 60_000 },
+  );
+
+  const generate = trpc.outreach.pitchPages.generate.useMutation({
+    onSuccess: (data) => {
+      setGeneratedUrl(data.url);
+      existingPages.refetch();
+    },
+  });
+
+  const latestPage = existingPages.data?.[0];
+
+  if (latestPage && !generatedUrl) {
+    return (
+      <a
+        href={`/api/pitch/${latestPage.urlSlug}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-brand-navy-900 transition-colors hover:bg-slate-50"
+      >
+        <Globe className="h-4 w-4" /> View Pitch Page
+      </a>
+    );
+  }
+
+  if (generatedUrl) {
+    return (
+      <a
+        href={generatedUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex w-full items-center justify-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700"
+      >
+        <CheckCircle2 className="h-4 w-4" /> Pitch Page Ready — View
+      </a>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => generate.mutate({ leadId })}
+      disabled={generate.isPending}
+      className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-brand-navy-900 transition-colors hover:bg-slate-50 disabled:opacity-50"
+    >
+      {generate.isPending ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <Target className="h-4 w-4" />
+      )}
+      {generate.isPending ? "Generating Pitch Page..." : "Generate Pitch Page"}
+    </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Compose Email Dialog
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -351,6 +415,21 @@ function ComposeEmailDialog({
       setSubject(applyMerge(tmpl.subject));
       setBody(applyMerge(tmpl.body));
     }
+  };
+
+  // AI draft generation
+  const aiDraft = trpc.outreach.aiDraft.useMutation({
+    onSuccess: (data) => {
+      setSubject(data.subject);
+      setBody(data.body);
+    },
+  });
+
+  const handleAiGenerate = () => {
+    aiDraft.mutate({
+      leadId: lead.id,
+      templateId: selectedTemplateId || undefined,
+    });
   };
 
   const canSave =
@@ -440,29 +519,43 @@ function ComposeEmailDialog({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+        <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-3">
           <button
-            onClick={onClose}
-            className="px-4 py-1.5 text-sm text-slate-500"
+            onClick={handleAiGenerate}
+            disabled={aiDraft.isPending}
+            className="flex items-center gap-1.5 rounded-md border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-100 disabled:opacity-50"
           >
-            Cancel
-          </button>
-          <button
-            onClick={() =>
-              createDraft.mutate({
-                leadId: lead.id,
-                subject: subject.trim(),
-                body: body.trim(),
-              })
-            }
-            disabled={!canSave}
-            className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {createDraft.isPending && (
+            {aiDraft.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Sparkles className="h-3 w-3" />
             )}
-            Save as Draft
+            {aiDraft.isPending ? "Generating..." : "AI Generate"}
           </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 text-sm text-slate-500"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() =>
+                createDraft.mutate({
+                  leadId: lead.id,
+                  subject: subject.trim(),
+                  body: body.trim(),
+                })
+              }
+              disabled={!canSave}
+              className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {createDraft.isPending && (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              )}
+              Save as Draft
+            </button>
+          </div>
         </div>
       </div>
     </div>

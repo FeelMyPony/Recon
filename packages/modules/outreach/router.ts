@@ -10,8 +10,13 @@ import { workspaces } from "../shared/schema/workspaces";
 import { users } from "../shared/schema/auth";
 import { workspaceMembers } from "../shared/schema/members";
 import { activityLog } from "../shared/schema/activity";
+import { pitchPages } from "./schema/pitch-pages";
 import { createTRPCRouter, protectedProcedure } from "./trpc";
 import { TRPCError } from "@trpc/server";
+import { scrapeSearch } from "./services/scraper";
+import { analyseLead, analyseLeads } from "./services/analyser";
+import { draftEmail } from "./services/email-drafter";
+import { generatePitchPage } from "./services/pitch-generator";
 
 export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
@@ -460,20 +465,7 @@ export const outreachRouter = createTRPCRouter({
 
         const search = rows[0]!;
 
-        // Emit event to trigger Outscraper Lambda via SQS
-        try {
-          const { emitEvent } = await import("@recon/events");
-          await emitEvent(
-            "outreach.search.created",
-            ctx.workspaceId,
-            "outreach",
-            { searchId: search.id, query: input.query, location: input.location },
-          );
-        } catch (err) {
-          // Event bus may not be initialised in dev — log and continue
-          console.warn("[outreach] Failed to emit search.created event:", err);
-        }
-
+        // Log activity
         try {
           await ctx.db.insert(activityLog).values({
             workspaceId: ctx.workspaceId,
@@ -484,6 +476,28 @@ export const outreachRouter = createTRPCRouter({
         } catch (e) {
           console.warn("[activity] Failed to log search_created:", e);
         }
+
+        // Trigger scraping + analysis in background (non-blocking)
+        const db = ctx.db;
+        const workspaceId = ctx.workspaceId;
+        const searchId = search.id;
+
+        Promise.resolve().then(async () => {
+          try {
+            console.log("[pipeline] Starting scrape for search", searchId);
+            const result = await scrapeSearch(db, searchId, workspaceId);
+            console.log("[pipeline] Scrape complete:", result.newLeadIds.length, "new leads");
+
+            // Auto-analyse new leads
+            if (result.newLeadIds.length > 0) {
+              console.log("[pipeline] Analysing", result.newLeadIds.length, "new leads...");
+              const analysed = await analyseLeads(db, result.newLeadIds, workspaceId);
+              console.log("[pipeline] Analysis complete:", analysed, "leads scored");
+            }
+          } catch (err) {
+            console.error("[pipeline] Background scrape/analyse failed:", err);
+          }
+        });
 
         return search;
       }),
@@ -1573,4 +1587,218 @@ export const outreachRouter = createTRPCRouter({
       byCategory,
     };
   }),
+
+  // ──────────────────────────────────────────────
+  // AI EMAIL DRAFTING
+  // ──────────────────────────────────────────────
+
+  aiDraft: protectedProcedure
+    .input(
+      z.object({
+        leadId: z.string().uuid(),
+        templateId: z.string().uuid().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Fetch lead
+      const [lead] = await ctx.db
+        .select()
+        .from(leads)
+        .where(
+          and(eq(leads.id, input.leadId), eq(leads.workspaceId, ctx.workspaceId)),
+        )
+        .limit(1);
+
+      if (!lead) throw new TRPCError({ code: "NOT_FOUND", message: "Lead not found" });
+
+      // Fetch latest analysis for pain points
+      const [analysis] = await ctx.db
+        .select()
+        .from(reviewAnalyses)
+        .where(eq(reviewAnalyses.leadId, input.leadId))
+        .orderBy(desc(reviewAnalyses.createdAt))
+        .limit(1);
+
+      const painPoints = [
+        ...((analysis?.weaknesses as string[]) ?? []),
+        ...((analysis?.opportunities as string[]) ?? []),
+      ];
+
+      // Fetch template if specified
+      let templateHint: { subject: string; body: string } | undefined;
+      if (input.templateId) {
+        const [tmpl] = await ctx.db
+          .select({ subject: emailTemplates.subject, body: emailTemplates.body })
+          .from(emailTemplates)
+          .where(eq(emailTemplates.id, input.templateId))
+          .limit(1);
+        if (tmpl) templateHint = tmpl;
+      }
+
+      // Fetch workspace service description
+      const [ws] = await ctx.db
+        .select({ settings: workspaces.settings })
+        .from(workspaces)
+        .where(eq(workspaces.id, ctx.workspaceId))
+        .limit(1);
+
+      const serviceDesc = (ws?.settings as any)?.serviceDescription ?? "";
+
+      // Generate draft
+      const draft = await draftEmail(
+        {
+          name: lead.name,
+          category: lead.category ?? "",
+          suburb: lead.suburb ?? "",
+          state: lead.state ?? "",
+          rating: String(lead.rating ?? "0"),
+          reviewCount: lead.reviewCount ?? 0,
+          painPoints,
+          website: lead.website,
+        },
+        serviceDesc,
+        templateHint,
+      );
+
+      return draft;
+    }),
+
+  // ──────────────────────────────────────────────
+  // PITCH PAGES
+  // ──────────────────────────────────────────────
+
+  pitchPages: createTRPCRouter({
+    generate: protectedProcedure
+      .input(z.object({ leadId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        // Fetch lead
+        const [lead] = await ctx.db
+          .select()
+          .from(leads)
+          .where(
+            and(eq(leads.id, input.leadId), eq(leads.workspaceId, ctx.workspaceId)),
+          )
+          .limit(1);
+
+        if (!lead) throw new TRPCError({ code: "NOT_FOUND", message: "Lead not found" });
+
+        // Fetch analysis
+        const [analysis] = await ctx.db
+          .select()
+          .from(reviewAnalyses)
+          .where(eq(reviewAnalyses.leadId, input.leadId))
+          .orderBy(desc(reviewAnalyses.createdAt))
+          .limit(1);
+
+        // Fetch workspace for service description + sender name
+        const [ws] = await ctx.db
+          .select({ settings: workspaces.settings, name: workspaces.name })
+          .from(workspaces)
+          .where(eq(workspaces.id, ctx.workspaceId))
+          .limit(1);
+
+        // Fetch user name
+        const [user] = await ctx.db
+          .select({ name: users.name })
+          .from(users)
+          .where(eq(users.id, ctx.userId))
+          .limit(1);
+
+        const serviceDesc = (ws?.settings as any)?.serviceDescription ?? "";
+        const senderName = user?.name ?? ws?.name ?? "RECON";
+
+        // Generate pitch page HTML
+        const result = await generatePitchPage({
+          leadName: lead.name,
+          category: lead.category ?? "",
+          suburb: lead.suburb ?? "",
+          state: lead.state ?? "",
+          rating: String(lead.rating ?? "0"),
+          reviewCount: lead.reviewCount ?? 0,
+          painPoints: (analysis?.weaknesses as string[]) ?? [],
+          strengths: (analysis?.strengths as string[]) ?? [],
+          opportunities: (analysis?.opportunities as string[]) ?? [],
+          serviceDescription: serviceDesc,
+          senderName,
+        });
+
+        // Generate URL slug
+        const slug =
+          lead.name
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "") +
+          "-" +
+          Date.now().toString(36);
+
+        // Store in database
+        const [page] = await ctx.db
+          .insert(pitchPages)
+          .values({
+            leadId: input.leadId,
+            workspaceId: ctx.workspaceId,
+            html: result.html,
+            urlSlug: slug,
+            modelUsed: result.model,
+            costCents: String(result.costCents),
+          })
+          .returning();
+
+        return {
+          id: page!.id,
+          slug,
+          url: `/api/pitch/${slug}`,
+          model: result.model,
+          costCents: result.costCents,
+        };
+      }),
+
+    getByLead: protectedProcedure
+      .input(z.object({ leadId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        return ctx.db
+          .select({
+            id: pitchPages.id,
+            urlSlug: pitchPages.urlSlug,
+            modelUsed: pitchPages.modelUsed,
+            createdAt: pitchPages.createdAt,
+          })
+          .from(pitchPages)
+          .where(
+            and(
+              eq(pitchPages.leadId, input.leadId),
+              eq(pitchPages.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .orderBy(desc(pitchPages.createdAt));
+      }),
+  }),
+
+  // ──────────────────────────────────────────────
+  // SEARCH STATUS (for polling)
+  // ──────────────────────────────────────────────
+
+  searchStatus: protectedProcedure
+    .input(z.object({ searchId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const [search] = await ctx.db
+        .select({
+          id: searches.id,
+          status: searches.status,
+          resultCount: searches.resultCount,
+          query: searches.query,
+          location: searches.location,
+          completedAt: searches.completedAt,
+        })
+        .from(searches)
+        .where(
+          and(
+            eq(searches.id, input.searchId),
+            eq(searches.workspaceId, ctx.workspaceId),
+          ),
+        )
+        .limit(1);
+
+      return search ?? null;
+    }),
 });
