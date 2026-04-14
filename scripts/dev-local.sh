@@ -49,10 +49,11 @@ if [ ! -f .env ]; then
   echo "⚠ Edit .env to set your API keys (OUTSCRAPER_API_KEY, ANTHROPIC_API_KEY)"
 fi
 
-# 4. Start Next.js dev server
+# 4. Start Next.js dev server (excluding the legacy local-scraper worker —
+#    scraping now runs inline inside the tRPC mutation, no separate worker needed)
 echo ""
 echo "→ Starting Next.js on http://localhost:3000"
-echo "  Mailpit UI:    http://localhost:8025"
+echo "  Mailpit UI:    http://localhost:8025 (if Docker is running)"
 echo "  Ollama API:    http://localhost:11434/v1"
 echo ""
-exec pnpm dev
+exec pnpm --filter @recon/web dev

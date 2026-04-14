@@ -11,6 +11,8 @@ import { leads } from "../schema/leads";
 interface OutscraperPlace {
   name: string;
   place_id: string;
+  // v3 uses "address", older versions used "full_address"
+  address?: string;
   full_address?: string;
   city?: string;
   state?: string;
@@ -19,12 +21,19 @@ interface OutscraperPlace {
   latitude?: number;
   longitude?: number;
   phone?: string;
+  // v3 uses "website", older versions used "site"
+  website?: string;
   site?: string;
-  subtypes?: string[];
+  // v3: "category" is primary (string); "subtypes" is a comma-separated string
+  category?: string;
+  subtypes?: string | string[];
   rating?: number;
   reviews?: number;
-  working_hours?: string[];
+  // v3: working_hours is an object keyed by day
+  working_hours?: Record<string, string[]> | string[];
+  // Only populated via separate email enrichment job, not basic search
   emails_and_contacts?: Array<{ email: string }>;
+  email_1?: string;
 }
 
 /**
@@ -144,8 +153,14 @@ async function callOutscraper(
     throw new Error(`Outscraper API ${response.status}: ${text.slice(0, 200)}`);
   }
 
-  const data = await response.json();
+  const raw = await response.json();
+
+  // Outscraper v3 returns { data: [[place, ...]], id, status }
+  // Older/async modes returned a naked array. Handle both shapes.
+  const data = Array.isArray(raw) ? raw : raw?.data;
+
   if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    console.error("[scraper] Unexpected Outscraper response:", JSON.stringify(raw).slice(0, 300));
     throw new Error("Invalid Outscraper response format");
   }
 
@@ -159,12 +174,34 @@ function parsePlace(
   workspaceId: string,
   sourceSearchId: string,
 ) {
+  // Outscraper v3 provides `category` directly. Older versions used `subtypes[0]`.
+  // `subtypes` in v3 is a comma-separated STRING, not an array.
+  let category: string = "Local Business";
+  if (place.category) {
+    category = place.category;
+  } else if (typeof place.subtypes === "string") {
+    category = place.subtypes.split(",")[0]?.trim() ?? "Local Business";
+  } else if (Array.isArray(place.subtypes) && place.subtypes.length > 0) {
+    category = place.subtypes[0] ?? "Local Business";
+  }
+
+  // v3 provides `working_hours` as an object keyed by day.
+  const openingHours = place.working_hours
+    ? Array.isArray(place.working_hours)
+      ? { hours: place.working_hours }
+      : place.working_hours
+    : undefined;
+
+  // Email only comes from separate enrichment endpoints, not basic search
+  const email =
+    place.emails_and_contacts?.[0]?.email ?? place.email_1 ?? undefined;
+
   return {
     workspaceId,
     googlePlaceId: place.place_id,
     name: place.name,
-    category: place.subtypes?.[0] ?? "Local Business",
-    address: place.full_address,
+    category,
+    address: place.address ?? place.full_address,
     suburb: place.city,
     state: place.state,
     postcode: place.postal_code,
@@ -172,14 +209,14 @@ function parsePlace(
     lat: place.latitude,
     lng: place.longitude,
     phone: place.phone,
-    website: place.site,
-    email: place.emails_and_contacts?.[0]?.email,
+    website: place.website ?? place.site,
+    email,
     rating: place.rating ? String(place.rating) : undefined,
     reviewCount: place.reviews ?? 0,
     googleMapsUrl: place.place_id
       ? `https://www.google.com/maps/place/?q=place_id:${place.place_id}`
       : undefined,
-    openingHours: place.working_hours ? { hours: place.working_hours } : undefined,
+    openingHours,
     sourceSearchId,
     status: "new" as const,
     score: "unscored" as const,
