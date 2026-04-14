@@ -477,29 +477,43 @@ export const outreachRouter = createTRPCRouter({
           console.warn("[activity] Failed to log search_created:", e);
         }
 
-        // Trigger scraping + analysis in background (non-blocking)
-        const db = ctx.db;
-        const workspaceId = ctx.workspaceId;
-        const searchId = search.id;
+        // Run scraping synchronously so it actually completes on Vercel serverless.
+        // (Fire-and-forget promises get killed when the function returns.)
+        // Outscraper sync mode with limit=50 typically returns in 10-15s; maxDuration is 60s.
+        try {
+          console.log("[pipeline] Starting scrape for search", search.id);
+          const result = await scrapeSearch(ctx.db, search.id, ctx.workspaceId);
+          console.log(
+            "[pipeline] Scrape complete:",
+            result.newLeadIds.length,
+            "new leads,",
+            result.updatedCount,
+            "updated",
+          );
 
-        Promise.resolve().then(async () => {
-          try {
-            console.log("[pipeline] Starting scrape for search", searchId);
-            const result = await scrapeSearch(db, searchId, workspaceId);
-            console.log("[pipeline] Scrape complete:", result.newLeadIds.length, "new leads");
-
-            // Auto-analyse new leads
-            if (result.newLeadIds.length > 0) {
-              console.log("[pipeline] Analysing", result.newLeadIds.length, "new leads...");
-              const analysed = await analyseLeads(db, result.newLeadIds, workspaceId);
-              console.log("[pipeline] Analysis complete:", analysed, "leads scored");
-            }
-          } catch (err) {
-            console.error("[pipeline] Background scrape/analyse failed:", err);
+          // Analyse only the first 3 leads inline to stay within the serverless
+          // timeout budget. Remaining leads can be analysed on-demand via
+          // outreach.analyseLead when the user views them.
+          const toAnalyseNow = result.newLeadIds.slice(0, 3);
+          if (toAnalyseNow.length > 0) {
+            console.log("[pipeline] Analysing first", toAnalyseNow.length, "leads inline...");
+            await analyseLeads(ctx.db, toAnalyseNow, ctx.workspaceId);
+            console.log("[pipeline] Inline analysis complete");
           }
-        });
+        } catch (err) {
+          console.error("[pipeline] Scrape/analyse failed:", err);
+          // Don't throw — return the search record even if scraping failed
+          // so the UI can show the failed status
+        }
 
-        return search;
+        // Fetch the updated search (scrapeSearch updates status + result_count)
+        const [updatedSearch] = await ctx.db
+          .select()
+          .from(searches)
+          .where(eq(searches.id, search.id))
+          .limit(1);
+
+        return updatedSearch ?? search;
       }),
 
     /**
@@ -1777,6 +1791,17 @@ export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
   // SEARCH STATUS (for polling)
   // ──────────────────────────────────────────────
+
+  // ──────────────────────────────────────────────
+  // Manual lead analysis (for leads skipped during scraping)
+  // ──────────────────────────────────────────────
+
+  analyseLead: protectedProcedure
+    .input(z.object({ leadId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await analyseLead(ctx.db, input.leadId, ctx.workspaceId);
+      return result;
+    }),
 
   searchStatus: protectedProcedure
     .input(z.object({ searchId: z.string().uuid() }))
