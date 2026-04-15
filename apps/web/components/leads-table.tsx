@@ -16,6 +16,10 @@ import {
   Loader2,
   Upload,
   Users,
+  Target,
+  Send,
+  X,
+  CheckCircle2,
 } from "lucide-react";
 import { LeadDetail } from "./lead-detail";
 import { CsvImportDialog } from "./csv-import-dialog";
@@ -95,6 +99,21 @@ export function LeadsTable() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [showBulkSend, setShowBulkSend] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{
+    kind: "analyse" | "send";
+    total: number;
+    succeeded: number;
+  } | null>(null);
+
+  // Bulk deep analyse (fetches reviews + AI pain points for selected leads)
+  const bulkAnalyse = trpc.outreach.bulkDeepAnalyse.useMutation({
+    onSuccess: (data) => {
+      setBulkResult({ kind: "analyse", total: data.total, succeeded: data.succeeded });
+      utils.outreach.leads.list.invalidate();
+      setSelectedIds(new Set());
+    },
+  });
 
   // Fetch leads from tRPC
   const utils = trpc.useUtils();
@@ -291,15 +310,36 @@ export function LeadsTable() {
 
           {/* Bulk actions */}
           {selectedIds.size > 0 && (
-            <div className="ml-2 flex items-center gap-1 rounded-md bg-brand-teal/10 px-2 py-1">
+            <div className="ml-2 flex items-center gap-1.5 rounded-md bg-brand-teal/10 px-2 py-1">
               <span className="text-xs font-medium text-brand-teal">
                 {selectedIds.size} selected
               </span>
-              <button className="rounded p-1 text-brand-teal hover:bg-brand-teal/10" title="Tag">
-                <Tag className="h-3 w-3" />
+              <button
+                onClick={() => {
+                  if (selectedIds.size > 10) {
+                    alert("Max 10 leads per bulk Deep Analyse (API cost + timeout).");
+                    return;
+                  }
+                  bulkAnalyse.mutate({ leadIds: Array.from(selectedIds) });
+                }}
+                disabled={bulkAnalyse.isPending}
+                className="flex items-center gap-1 rounded bg-purple-100 px-1.5 py-0.5 text-[11px] font-medium text-purple-700 hover:bg-purple-200 disabled:opacity-50"
+                title="Fetch reviews + AI pain point extraction for each selected lead"
+              >
+                {bulkAnalyse.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Target className="h-3 w-3" />
+                )}
+                Deep Analyse
               </button>
-              <button className="rounded p-1 text-brand-teal hover:bg-brand-teal/10" title="Email">
-                <Mail className="h-3 w-3" />
+              <button
+                onClick={() => setShowBulkSend(true)}
+                className="flex items-center gap-1 rounded bg-brand-teal px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-brand-teal-600"
+                title="AI-draft + send email to each selected lead"
+              >
+                <Send className="h-3 w-3" />
+                Bulk Send
               </button>
               <button
                 className="rounded p-1 text-brand-teal hover:bg-brand-teal/10"
@@ -519,6 +559,237 @@ export function LeadsTable() {
           }}
         />
       )}
+
+      {/* Bulk result banner */}
+      {bulkResult && (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-40 -translate-x-1/2">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800 shadow-lg">
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              Bulk {bulkResult.kind}: {bulkResult.succeeded}/{bulkResult.total} succeeded
+            </span>
+            <button
+              onClick={() => setBulkResult(null)}
+              className="ml-1 rounded p-0.5 text-emerald-600 hover:bg-emerald-100"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Send dialog */}
+      {showBulkSend && (
+        <BulkSendDialog
+          selectedIds={Array.from(selectedIds)}
+          leads={filteredLeads.filter((l) => selectedIds.has(l.id))}
+          onClose={() => setShowBulkSend(false)}
+          onComplete={(res) => {
+            setBulkResult({
+              kind: "send",
+              total: res.total,
+              succeeded: res.succeeded,
+            });
+            setSelectedIds(new Set());
+            setShowBulkSend(false);
+            utils.outreach.leads.list.invalidate();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Bulk Send Dialog
+// ─────────────────────────────────────────────────────────────────────────
+
+function BulkSendDialog({
+  selectedIds,
+  leads,
+  onClose,
+  onComplete,
+}: {
+  selectedIds: string[];
+  leads: TableLead[];
+  onClose: () => void;
+  onComplete: (res: { total: number; succeeded: number }) => void;
+}) {
+  const [templateId, setTemplateId] = useState<string | "">("");
+  const [attachPdf, setAttachPdf] = useState(false);
+  const [sendDelayMs, setSendDelayMs] = useState(2000);
+  const [results, setResults] = useState<Array<{
+    leadId: string;
+    leadName?: string;
+    ok: boolean;
+    error?: string;
+  }> | null>(null);
+
+  const templatesQuery = trpc.outreach.templates.list.useQuery();
+
+  const withoutEmail = leads.filter((l) => !l.email).length;
+  const sendableCount = leads.length - withoutEmail;
+
+  const bulkSend = trpc.outreach.bulkSend.useMutation({
+    onSuccess: (data) => {
+      setResults(data.results);
+      // Close + report after 2s so user sees results
+      setTimeout(() => {
+        onComplete({ total: data.total, succeeded: data.succeeded });
+      }, 2500);
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-brand-navy-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-lg overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-brand-navy-900">
+              Bulk Send
+            </h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              AI-draft + send personalised email to each selected lead
+            </p>
+          </div>
+          <button onClick={onClose} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {results ? (
+          <div className="p-5">
+            <div className="mb-3 text-sm font-semibold text-brand-navy-900">
+              Results: {results.filter((r) => r.ok).length}/{results.length} sent
+            </div>
+            <div className="scrollbar-thin max-h-64 overflow-auto rounded-md border border-slate-200">
+              {results.map((r, i) => (
+                <div
+                  key={r.leadId}
+                  className={`flex items-center gap-2 border-b border-slate-100 px-3 py-2 text-xs last:border-b-0 ${
+                    r.ok ? "text-emerald-700" : "text-red-600"
+                  }`}
+                >
+                  {r.ok ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+                  ) : (
+                    <X className="h-3.5 w-3.5 flex-shrink-0" />
+                  )}
+                  <span className="flex-1 truncate">
+                    {r.leadName ?? r.leadId}
+                  </span>
+                  {!r.ok && <span className="text-[10px]">{r.error}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4 p-5">
+            <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600">
+              <div>
+                <strong>{sendableCount}</strong> of {leads.length} leads will receive emails
+              </div>
+              {withoutEmail > 0 && (
+                <div className="mt-1 text-amber-600">
+                  {withoutEmail} lead{withoutEmail > 1 ? "s" : ""} will be skipped (no email)
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-500">
+                Template (optional — AI uses as starting point)
+              </label>
+              <select
+                value={templateId}
+                onChange={(e) => setTemplateId(e.target.value)}
+                className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900"
+              >
+                <option value="">— Generate from scratch (per-lead pain points) —</option>
+                {(templatesQuery.data ?? []).map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <label className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={attachPdf}
+                onChange={(e) => setAttachPdf(e.target.checked)}
+                className="h-3.5 w-3.5 accent-brand-teal"
+              />
+              Attach proposal PDF (only for leads with a pitch page)
+            </label>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-500">
+                Delay between sends: {(sendDelayMs / 1000).toFixed(1)}s
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="10000"
+                step="500"
+                value={sendDelayMs}
+                onChange={(e) => setSendDelayMs(Number(e.target.value))}
+                className="w-full accent-brand-teal"
+              />
+              <p className="mt-1 text-[10px] text-slate-400">
+                Anti-spam pacing. Recommended 2-5s for cold outreach.
+              </p>
+            </div>
+
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+              <strong>Heads up:</strong> Each email is AI-generated + personalised using that lead&apos;s
+              pain points. Requires your Resend API key to be set.
+            </div>
+
+            {bulkSend.error && (
+              <div className="rounded-md bg-red-50 p-2.5 text-xs text-red-600">
+                {bulkSend.error.message}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!results && (
+          <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm text-slate-500"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() =>
+                bulkSend.mutate({
+                  leadIds: selectedIds,
+                  templateId: templateId || undefined,
+                  attachProposalPdf: attachPdf,
+                  sendDelayMs,
+                })
+              }
+              disabled={bulkSend.isPending || sendableCount === 0}
+              className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:opacity-50"
+            >
+              {bulkSend.isPending ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Sending {sendableCount}...
+                </>
+              ) : (
+                <>
+                  <Send className="h-3 w-3" />
+                  Send to {sendableCount}
+                </>
+              )}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

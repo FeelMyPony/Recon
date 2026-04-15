@@ -2100,6 +2100,324 @@ export const outreachRouter = createTRPCRouter({
       };
     }),
 
+  // ──────────────────────────────────────────────
+  // BULK OPERATIONS — apply actions to multiple selected leads
+  // ──────────────────────────────────────────────
+
+  bulkDeepAnalyse: protectedProcedure
+    .input(
+      z.object({
+        leadIds: z.array(z.string().uuid()).min(1).max(10),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const results: Array<{
+        leadId: string;
+        ok: boolean;
+        error?: string;
+        painPointCount?: number;
+        newOpportunityScore?: number;
+      }> = [];
+
+      for (const leadId of input.leadIds) {
+        try {
+          const [lead] = await ctx.db
+            .select()
+            .from(leads)
+            .where(
+              and(
+                eq(leads.id, leadId),
+                eq(leads.workspaceId, ctx.workspaceId),
+              ),
+            )
+            .limit(1);
+
+          if (!lead || !lead.googlePlaceId) {
+            results.push({ leadId, ok: false, error: "No Google Place ID" });
+            continue;
+          }
+
+          // Fetch reviews (top 20)
+          const outscraperReviews = await fetchReviews(lead.googlePlaceId, 20);
+
+          // Upsert reviews
+          for (const r of outscraperReviews) {
+            if (!r.review_id) continue;
+            const existing = await ctx.db
+              .select({ id: reviews.id })
+              .from(reviews)
+              .where(
+                and(
+                  eq(reviews.leadId, lead.id),
+                  eq(reviews.outscraperId, r.review_id),
+                ),
+              )
+              .limit(1);
+            if (existing.length > 0) continue;
+
+            await ctx.db.insert(reviews).values({
+              leadId: lead.id,
+              workspaceId: ctx.workspaceId,
+              author: r.author_title ?? null,
+              rating: r.review_rating ?? null,
+              text: r.review_text ?? null,
+              ownerReply: r.owner_answer ?? null,
+              publishedAt: r.review_datetime_utc
+                ? new Date(r.review_datetime_utc)
+                : null,
+              outscraperId: r.review_id,
+            });
+          }
+
+          // Run AI analysis
+          const analysis = await analyseLead(ctx.db, lead.id, ctx.workspaceId);
+
+          // Recompute opportunity score
+          const painPointCount =
+            (analysis?.weaknesses.length ?? 0) +
+            (analysis?.opportunities.length ?? 0);
+          const newScore = computeOpportunityScore({
+            hasWebsite: !!lead.website,
+            hasEmail: !!lead.email,
+            rating: lead.rating ? Number(lead.rating) : 0,
+            reviewCount: lead.reviewCount ?? 0,
+            painPointCount,
+          });
+
+          await ctx.db
+            .update(leads)
+            .set({ opportunityScore: newScore, updatedAt: new Date() })
+            .where(eq(leads.id, lead.id));
+
+          results.push({
+            leadId,
+            ok: true,
+            painPointCount,
+            newOpportunityScore: newScore,
+          });
+        } catch (err) {
+          results.push({
+            leadId,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+
+      try {
+        await ctx.db.insert(activityLog).values({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          action: "bulk_deep_analysed",
+          details: { count: input.leadIds.length, succeeded },
+        });
+      } catch (e) {
+        console.warn("[activity] Failed to log bulk_deep_analysed:", e);
+      }
+
+      return { total: input.leadIds.length, succeeded, results };
+    }),
+
+  bulkSend: protectedProcedure
+    .input(
+      z.object({
+        leadIds: z.array(z.string().uuid()).min(1).max(20),
+        templateId: z.string().uuid().optional(),
+        attachProposalPdf: z.boolean().default(false),
+        /** Delay between sends in ms (anti-spam). Default 2s. */
+        sendDelayMs: z.number().min(0).max(10000).default(2000),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const results: Array<{
+        leadId: string;
+        leadName?: string;
+        ok: boolean;
+        error?: string;
+        messageId?: string;
+      }> = [];
+
+      // Load workspace service description once
+      const [ws] = await ctx.db
+        .select({ settings: workspaces.settings })
+        .from(workspaces)
+        .where(eq(workspaces.id, ctx.workspaceId))
+        .limit(1);
+      const serviceDesc = (ws?.settings as any)?.serviceDescription ?? "";
+
+      // Load template once if specified
+      let templateHint: { subject: string; body: string } | undefined;
+      if (input.templateId) {
+        const [tmpl] = await ctx.db
+          .select({ subject: emailTemplates.subject, body: emailTemplates.body })
+          .from(emailTemplates)
+          .where(eq(emailTemplates.id, input.templateId))
+          .limit(1);
+        if (tmpl) templateHint = tmpl;
+      }
+
+      for (let i = 0; i < input.leadIds.length; i++) {
+        const leadId = input.leadIds[i]!;
+        try {
+          const [lead] = await ctx.db
+            .select()
+            .from(leads)
+            .where(
+              and(
+                eq(leads.id, leadId),
+                eq(leads.workspaceId, ctx.workspaceId),
+              ),
+            )
+            .limit(1);
+
+          if (!lead) {
+            results.push({ leadId, ok: false, error: "Lead not found" });
+            continue;
+          }
+          if (!lead.email) {
+            results.push({ leadId, leadName: lead.name, ok: false, error: "No email address" });
+            continue;
+          }
+
+          // Fetch latest pain points for personalisation
+          const [analysis] = await ctx.db
+            .select()
+            .from(reviewAnalyses)
+            .where(eq(reviewAnalyses.leadId, leadId))
+            .orderBy(desc(reviewAnalyses.createdAt))
+            .limit(1);
+
+          const painPoints = [
+            ...((analysis?.weaknesses as string[]) ?? []),
+            ...((analysis?.opportunities as string[]) ?? []),
+          ];
+
+          // AI-generate personalised email for this lead
+          const draft = await draftEmail(
+            {
+              name: lead.name,
+              category: lead.category ?? "",
+              suburb: lead.suburb ?? "",
+              state: lead.state ?? "",
+              rating: String(lead.rating ?? "0"),
+              reviewCount: lead.reviewCount ?? 0,
+              painPoints,
+              website: lead.website,
+            },
+            serviceDesc,
+            templateHint,
+          );
+
+          // Create email record + send via Resend
+          const [emailRecord] = await ctx.db
+            .insert(outreachEmails)
+            .values({
+              leadId,
+              workspaceId: ctx.workspaceId,
+              subject: draft.subject,
+              body: draft.body,
+              toEmail: lead.email,
+              status: "queued",
+            })
+            .returning();
+
+          // Build attachments if requested
+          const attachments: Array<{ filename: string; content: string }> = [];
+          if (input.attachProposalPdf) {
+            const [pdfRow] = await ctx.db
+              .select({ pdfBytes: pitchPages.pdfBytes })
+              .from(pitchPages)
+              .where(
+                and(
+                  eq(pitchPages.leadId, leadId),
+                  eq(pitchPages.workspaceId, ctx.workspaceId),
+                ),
+              )
+              .orderBy(desc(pitchPages.createdAt))
+              .limit(1);
+
+            if (pdfRow?.pdfBytes) {
+              const safeName = lead.name
+                .replace(/[^a-z0-9]+/gi, "-")
+                .toLowerCase();
+              attachments.push({
+                filename: `${safeName}-proposal.pdf`,
+                content: Buffer.from(pdfRow.pdfBytes).toString("base64"),
+              });
+            }
+          }
+
+          // Convert body to HTML if plain text
+          const html = draft.body.includes("<")
+            ? draft.body
+            : `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;">${draft.body.replaceAll("\n", "<br>")}</div>`;
+
+          const { messageId } = await sendEmail({
+            to: lead.email,
+            subject: draft.subject,
+            html,
+            attachments: attachments.length > 0 ? attachments : undefined,
+          });
+
+          // Mark email as sent
+          const now = new Date();
+          await ctx.db
+            .update(outreachEmails)
+            .set({ status: "sent", sentAt: now, providerMessageId: messageId })
+            .where(eq(outreachEmails.id, emailRecord!.id));
+
+          // Bump lead status
+          await ctx.db
+            .update(leads)
+            .set({
+              lastContactedAt: now,
+              updatedAt: now,
+              status: lead.status === "new" ? "contacted" : lead.status,
+            })
+            .where(eq(leads.id, leadId));
+
+          results.push({
+            leadId,
+            leadName: lead.name,
+            ok: true,
+            messageId,
+          });
+
+          // Anti-spam: wait between sends (except for last one)
+          if (i < input.leadIds.length - 1 && input.sendDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, input.sendDelayMs));
+          }
+        } catch (err) {
+          results.push({
+            leadId,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+
+      try {
+        await ctx.db.insert(activityLog).values({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          action: "bulk_email_sent",
+          details: {
+            total: input.leadIds.length,
+            succeeded,
+            attachedProposal: input.attachProposalPdf,
+          },
+        });
+      } catch (e) {
+        console.warn("[activity] Failed to log bulk_email_sent:", e);
+      }
+
+      return { total: input.leadIds.length, succeeded, results };
+    }),
+
   searchStatus: protectedProcedure
     .input(z.object({ searchId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
