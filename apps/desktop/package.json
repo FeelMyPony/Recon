@@ -1,0 +1,42 @@
+{
+  "name": "@recon/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "description": "RECON desktop app — Electron wrapper around the Next.js dashboard",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "electron-builder --mac --arm64",
+    "build:mac-universal": "electron-builder --mac --universal"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "co.warmedup.recon",
+    "productName": "RECON",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "assets/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["arm64"]
+        }
+      ],
+      "identity": null
+    },
+    "asar": true,
+    "extraMetadata": {
+      "main": "main.js"
+    }
+  }
+}
