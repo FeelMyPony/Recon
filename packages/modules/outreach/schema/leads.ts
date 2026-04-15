@@ -83,6 +83,8 @@ export const leads = pgTable(
     // Pipeline
     status: leadStatusEnum("status").default("new"),
     score: leadScoreEnum("score").default("unscored"),
+    /** Numeric 0-100 ranking combining criteria match + health + AI pain points */
+    opportunityScore: integer("opportunity_score").default(0).notNull(),
     tags: text("tags")
       .array()
       .default([]),

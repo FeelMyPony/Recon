@@ -11,7 +11,6 @@ import { leads } from "../schema/leads";
 interface OutscraperPlace {
   name: string;
   place_id: string;
-  // v3 uses "address", older versions used "full_address"
   address?: string;
   full_address?: string;
   city?: string;
@@ -21,30 +20,67 @@ interface OutscraperPlace {
   latitude?: number;
   longitude?: number;
   phone?: string;
-  // v3 uses "website", older versions used "site"
   website?: string;
   site?: string;
-  // v3: "category" is primary (string); "subtypes" is a comma-separated string
   category?: string;
   subtypes?: string | string[];
   rating?: number;
   reviews?: number;
-  // v3: working_hours is an object keyed by day
   working_hours?: Record<string, string[]> | string[];
-  // Only populated via separate email enrichment job, not basic search
   emails_and_contacts?: Array<{ email: string }>;
   email_1?: string;
 }
 
+/** Post-scrape filters matching the user's search criteria */
+export interface ScrapeFilters {
+  /** Only keep places with rating >= this value */
+  minRating?: number;
+  /** Only keep places with at least this many reviews */
+  minReviewCount?: number;
+  /** Only keep places that do NOT have a website */
+  excludeWithWebsite?: boolean;
+  /** Only keep places that have an email */
+  requireEmail?: boolean;
+}
+
 /**
- * Run a full scrape job: call Outscraper, upsert leads, update search status.
+ * Compute an opportunity score (0-100) for a lead.
+ * Higher = better outreach target.
+ *
+ *   + up to 25 for no-website (outreach angle)
+ *   + up to 25 for rating (5★ = 25)
+ *   + up to 15 for review count (log scale, caps at ~50 reviews)
+ *   + up to 35 for AI pain points (7 per pain point, 5 max)
+ *   - 10 if no email (harder to reach)
+ */
+export function computeOpportunityScore(params: {
+  hasWebsite: boolean;
+  hasEmail: boolean;
+  rating: number; // 0-5
+  reviewCount: number;
+  painPointCount: number; // 0-5
+}): number {
+  const { hasWebsite, hasEmail, rating, reviewCount, painPointCount } = params;
+
+  let score = 0;
+  score += hasWebsite ? 0 : 25;
+  score += Math.min(25, Math.max(0, rating) * 5);
+  score += Math.min(15, Math.log10(Math.max(0, reviewCount) + 1) * 6);
+  score += Math.min(35, Math.max(0, painPointCount) * 7);
+  score -= hasEmail ? 0 : 10;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+/**
+ * Run a full scrape job: call Outscraper, filter + upsert leads, update search status.
  * Returns the IDs of newly created leads.
  */
 export async function scrapeSearch(
   db: PostgresJsDatabase,
   searchId: string,
   workspaceId: string,
-): Promise<{ newLeadIds: string[]; updatedCount: number; totalPlaces: number }> {
+): Promise<{ newLeadIds: string[]; updatedCount: number; totalPlaces: number; filteredCount: number }> {
   // 1. Fetch search record
   const [search] = await db
     .select()
@@ -54,15 +90,27 @@ export async function scrapeSearch(
 
   if (!search) throw new Error(`Search ${searchId} not found`);
 
+  const filters = (search.filters as ScrapeFilters) ?? {};
+
   // Mark as running
   await db.update(searches).set({ status: "running" }).where(eq(searches.id, searchId));
 
   try {
     // 2. Call Outscraper
-    const places = await callOutscraper(search.query, search.location);
-    console.log("[scraper] Outscraper returned", places.length, "places");
+    const allPlaces = await callOutscraper(search.query, search.location);
+    console.log("[scraper] Outscraper returned", allPlaces.length, "places");
 
-    // 3. Upsert leads
+    // 3. Apply search filters (post-fetch, client-side)
+    const places = allPlaces.filter((p) => {
+      if (filters.minRating != null && (p.rating ?? 0) < filters.minRating) return false;
+      if (filters.minReviewCount != null && (p.reviews ?? 0) < filters.minReviewCount) return false;
+      if (filters.excludeWithWebsite && (p.website ?? p.site)) return false;
+      if (filters.requireEmail && !(p.emails_and_contacts?.[0]?.email ?? p.email_1)) return false;
+      return true;
+    });
+    console.log("[scraper] After filters:", places.length, "places");
+
+    // 4. Upsert leads with initial opportunity score
     const newLeadIds: string[] = [];
     let updatedCount = 0;
 
@@ -70,6 +118,17 @@ export async function scrapeSearch(
       if (!place.place_id) continue;
 
       const leadData = parsePlace(place, workspaceId, searchId);
+
+      // Compute initial opportunity score (no pain points yet — AI will update later)
+      const initialScore = computeOpportunityScore({
+        hasWebsite: !!(place.website ?? place.site),
+        hasEmail: !!(place.emails_and_contacts?.[0]?.email ?? place.email_1),
+        rating: place.rating ?? 0,
+        reviewCount: place.reviews ?? 0,
+        painPointCount: 0,
+      });
+
+      const leadDataWithScore = { ...leadData, opportunityScore: initialScore };
 
       // Check if exists
       const [existing] = await db
@@ -87,7 +146,7 @@ export async function scrapeSearch(
         await db
           .update(leads)
           .set({
-            ...leadData,
+            ...leadDataWithScore,
             updatedAt: new Date(),
             // Don't overwrite status/score if already set
             status: undefined,
@@ -98,13 +157,13 @@ export async function scrapeSearch(
       } else {
         const [newLead] = await db
           .insert(leads)
-          .values(leadData as any)
+          .values(leadDataWithScore as any)
           .returning({ id: leads.id });
         if (newLead) newLeadIds.push(newLead.id);
       }
     }
 
-    // 4. Update search status
+    // 5. Update search status
     await db
       .update(searches)
       .set({
@@ -115,9 +174,13 @@ export async function scrapeSearch(
       .where(eq(searches.id, searchId));
 
     console.log("[scraper] Done:", newLeadIds.length, "new,", updatedCount, "updated");
-    return { newLeadIds, updatedCount, totalPlaces: places.length };
+    return {
+      newLeadIds,
+      updatedCount,
+      totalPlaces: allPlaces.length,
+      filteredCount: places.length,
+    };
   } catch (err) {
-    // Mark search as failed
     await db
       .update(searches)
       .set({ status: "failed", completedAt: new Date() })
@@ -126,7 +189,7 @@ export async function scrapeSearch(
   }
 }
 
-// ─── Outscraper API ────────────────────────────────────────────────────
+// ─── Outscraper: places search ────────────────────────────────────────
 
 async function callOutscraper(
   query: string,
@@ -154,9 +217,6 @@ async function callOutscraper(
   }
 
   const raw = await response.json();
-
-  // Outscraper v3 returns { data: [[place, ...]], id, status }
-  // Older/async modes returned a naked array. Handle both shapes.
   const data = Array.isArray(raw) ? raw : raw?.data;
 
   if (!Array.isArray(data) || !Array.isArray(data[0])) {
@@ -167,6 +227,62 @@ async function callOutscraper(
   return data[0];
 }
 
+// ─── Outscraper: reviews fetch ───────────────────────────────────────
+
+export interface OutscraperReview {
+  author_title?: string;
+  review_rating?: number;
+  review_text?: string;
+  review_id?: string;
+  review_datetime_utc?: string;
+  owner_answer?: string;
+}
+
+/**
+ * Fetch up to `limit` Google reviews for a given place.
+ * Uses Outscraper's google-maps-reviews-v3 endpoint.
+ */
+export async function fetchReviews(
+  googlePlaceId: string,
+  limit = 20,
+): Promise<OutscraperReview[]> {
+  const apiKey = process.env.OUTSCRAPER_API_KEY;
+  if (!apiKey) throw new Error("OUTSCRAPER_API_KEY is required");
+
+  const url = new URL("https://api.outscraper.com/maps/reviews-v3");
+  url.searchParams.set("query", googlePlaceId);
+  url.searchParams.set("reviewsLimit", String(limit));
+  url.searchParams.set("sort", "newest");
+  url.searchParams.set("async", "false");
+
+  console.log("[scraper] Fetching reviews for", googlePlaceId, "(limit", limit, ")");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      "X-API-KEY": apiKey,
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Outscraper reviews API ${response.status}: ${text.slice(0, 200)}`);
+  }
+
+  const raw = await response.json();
+  const data = Array.isArray(raw) ? raw : raw?.data;
+  if (!Array.isArray(data) || data.length === 0) return [];
+
+  // data[0] is the place; its reviews_data array contains reviews
+  const placeResult = data[0];
+  if (Array.isArray(placeResult)) return placeResult as OutscraperReview[];
+  if (placeResult && Array.isArray(placeResult.reviews_data)) {
+    return placeResult.reviews_data as OutscraperReview[];
+  }
+
+  return [];
+}
+
 // ─── Place → Lead parsing ──────────────────────────────────────────────
 
 function parsePlace(
@@ -174,8 +290,6 @@ function parsePlace(
   workspaceId: string,
   sourceSearchId: string,
 ) {
-  // Outscraper v3 provides `category` directly. Older versions used `subtypes[0]`.
-  // `subtypes` in v3 is a comma-separated STRING, not an array.
   let category: string = "Local Business";
   if (place.category) {
     category = place.category;
@@ -185,14 +299,12 @@ function parsePlace(
     category = place.subtypes[0] ?? "Local Business";
   }
 
-  // v3 provides `working_hours` as an object keyed by day.
   const openingHours = place.working_hours
     ? Array.isArray(place.working_hours)
       ? { hours: place.working_hours }
       : place.working_hours
     : undefined;
 
-  // Email only comes from separate enrichment endpoints, not basic search
   const email =
     place.emails_and_contacts?.[0]?.email ?? place.email_1 ?? undefined;
 

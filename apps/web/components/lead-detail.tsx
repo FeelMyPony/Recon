@@ -173,16 +173,21 @@ export function LeadDetail({
         {/* AI Analysis (fetched from DB) */}
         <LeadAnalysisSection leadId={lead.id} />
 
+        {/* 3-step workflow */}
         <div className="space-y-2 px-4 py-3">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            Outreach workflow
+          </div>
+          <DeepAnalyseButton leadId={lead.id} />
+          <PitchPageButton leadId={lead.id} leadName={lead.name} />
           <button
             onClick={() => setShowCompose(true)}
             disabled={!lead.email}
             className="flex w-full items-center justify-center gap-2 rounded-md bg-brand-teal px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles className="h-4 w-4" />{" "}
-            {lead.email ? "Compose Outreach Email" : "No email address"}
+            {lead.email ? "Compose & Send Email" : "No email address"}
           </button>
-          <PitchPageButton leadId={lead.id} leadName={lead.name} />
         </div>
       </div>
 
@@ -299,6 +304,68 @@ function LeadAnalysisSection({ leadId }: { leadId: string }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Pitch Page Button
 // ─────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────
+// Deep Analyse Button — fetches reviews + runs AI pain point extraction
+// ─────────────────────────────────────────────────────────────────────────
+
+function DeepAnalyseButton({ leadId }: { leadId: string }) {
+  const utils = trpc.useUtils();
+  const [lastResult, setLastResult] = useState<{
+    reviewsInserted: number;
+    painPointCount: number;
+    newOpportunityScore: number;
+  } | null>(null);
+
+  const deepAnalyse = trpc.outreach.deepAnalyse.useMutation({
+    onSuccess: (data) => {
+      setLastResult({
+        reviewsInserted: data.reviewsInserted,
+        painPointCount: data.painPointCount,
+        newOpportunityScore: data.newOpportunityScore,
+      });
+      // Invalidate queries so the lead-detail panel re-fetches the fresh analysis
+      utils.outreach.leads.getById.invalidate({ id: leadId });
+      utils.outreach.leads.list.invalidate();
+    },
+  });
+
+  if (lastResult) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+        <CheckCircle2 className="h-4 w-4" />
+        <span>
+          Fetched {lastResult.reviewsInserted} reviews ·{" "}
+          {lastResult.painPointCount} pain points · score{" "}
+          {lastResult.newOpportunityScore}/100
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => deepAnalyse.mutate({ leadId })}
+      disabled={deepAnalyse.isPending}
+      className="flex w-full items-center justify-center gap-2 rounded-md border border-purple-200 bg-purple-50 px-3 py-2 text-sm font-medium text-purple-700 transition-colors hover:bg-purple-100 disabled:opacity-50"
+    >
+      {deepAnalyse.isPending ? (
+        <>
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Fetching reviews + analysing...
+        </>
+      ) : (
+        <>
+          <Target className="h-4 w-4" />
+          Deep Analyse Reviews
+        </>
+      )}
+      {deepAnalyse.error && (
+        <span className="text-xs text-red-500">{deepAnalyse.error.message}</span>
+      )}
+    </button>
+  );
+}
 
 function PitchPageButton({ leadId, leadName }: { leadId: string; leadName: string }) {
   const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
@@ -432,11 +499,47 @@ function ComposeEmailDialog({
     });
   };
 
+  // Check for existing pitch page (to enable "attach proposal")
+  const pitchPagesQuery = trpc.outreach.pitchPages.getByLead.useQuery(
+    { leadId: lead.id },
+    { retry: false, staleTime: 60_000 },
+  );
+  const hasPitchPage = (pitchPagesQuery.data?.length ?? 0) > 0;
+  const [attachPdf, setAttachPdf] = useState(true);
+  const [sent, setSent] = useState(false);
+
+  // Send now: creates draft then sends it immediately
+  const sendMut = trpc.outreach.emails.send.useMutation({
+    onSuccess: () => {
+      setSent(true);
+      utils.outreach.emails.list.invalidate();
+      utils.outreach.leads.list.invalidate();
+      setTimeout(onClose, 1500);
+    },
+  });
+
+  const handleSendNow = async () => {
+    // Create the draft first, then immediately send it
+    const draftResult = await createDraft.mutateAsync({
+      leadId: lead.id,
+      subject: subject.trim(),
+      body: body.trim(),
+    });
+    if (draftResult?.id) {
+      sendMut.mutate({
+        emailId: draftResult.id,
+        attachProposalPdf: hasPitchPage && attachPdf,
+      });
+    }
+  };
+
   const canSave =
     subject.trim().length > 0 &&
     body.trim().length > 0 &&
     !createDraft.isPending &&
-    !saved;
+    !sendMut.isPending &&
+    !saved &&
+    !sent;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-brand-navy-900/60 backdrop-blur-sm">
@@ -519,23 +622,50 @@ function ComposeEmailDialog({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-3">
-          <button
-            onClick={handleAiGenerate}
-            disabled={aiDraft.isPending}
-            className="flex items-center gap-1.5 rounded-md border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-100 disabled:opacity-50"
-          >
-            {aiDraft.isPending ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Sparkles className="h-3 w-3" />
+        {/* Error + success banners above footer */}
+        {sendMut.error && (
+          <div className="border-t border-red-100 bg-red-50 px-5 py-2 text-xs text-red-600">
+            {sendMut.error.message}
+          </div>
+        )}
+        {sent && (
+          <div className="flex items-center gap-2 border-t border-emerald-100 bg-emerald-50 px-5 py-2 text-xs text-emerald-700">
+            <CheckCircle2 className="h-4 w-4" /> Email sent via Resend.
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAiGenerate}
+              disabled={aiDraft.isPending}
+              className="flex items-center gap-1.5 rounded-md border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-100 disabled:opacity-50"
+            >
+              {aiDraft.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Sparkles className="h-3 w-3" />
+              )}
+              {aiDraft.isPending ? "Generating..." : "AI Generate"}
+            </button>
+
+            {hasPitchPage && (
+              <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={attachPdf}
+                  onChange={(e) => setAttachPdf(e.target.checked)}
+                  className="h-3 w-3 accent-brand-teal"
+                />
+                Attach proposal PDF
+              </label>
             )}
-            {aiDraft.isPending ? "Generating..." : "AI Generate"}
-          </button>
+          </div>
+
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-1.5 text-sm text-slate-500"
+              className="px-3 py-1.5 text-sm text-slate-500"
             >
               Cancel
             </button>
@@ -548,12 +678,23 @@ function ComposeEmailDialog({
                 })
               }
               disabled={!canSave}
-              className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-brand-navy-900 hover:bg-slate-50 disabled:opacity-50"
             >
-              {createDraft.isPending && (
+              {createDraft.isPending && !sendMut.isPending && (
                 <Loader2 className="h-3 w-3 animate-spin" />
               )}
-              Save as Draft
+              Save Draft
+            </button>
+            <button
+              onClick={handleSendNow}
+              disabled={!canSave}
+              className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-teal-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {(createDraft.isPending || sendMut.isPending) && (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              )}
+              <Mail className="h-3 w-3" />
+              {sendMut.isPending ? "Sending..." : "Send Now"}
             </button>
           </div>
         </div>

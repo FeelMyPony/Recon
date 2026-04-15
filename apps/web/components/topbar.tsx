@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Search, Sparkles, X, Loader2 } from "lucide-react";
+import { Search, Sparkles, X, Loader2, Check } from "lucide-react";
 import { trpc } from "../lib/trpc/client";
 
 export function Topbar() {
@@ -49,19 +49,21 @@ export function Topbar() {
         </button>
       </div>
 
-      {/* Search Modal */}
-      {showSearch && (
-        <SearchModal onClose={() => setShowSearch(false)} />
-      )}
+      {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
     </>
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Search Modal — enhanced filters for targeted outreach
+// ─────────────────────────────────────────────────────────────────────────
+
 function SearchModal({ onClose }: { onClose: () => void }) {
-  const [category, setCategory] = useState("NDIS Provider");
+  const [category, setCategory] = useState("plumber");
   const [location, setLocation] = useState("Melbourne VIC");
-  const [minRating, setMinRating] = useState("any");
-  const [mustHave, setMustHave] = useState("none");
+  const [goodReviews, setGoodReviews] = useState(true);
+  const [excludeWithWebsite, setExcludeWithWebsite] = useState(false);
+  const [requireEmail, setRequireEmail] = useState(false);
 
   const utils = trpc.useUtils();
   const createSearch = trpc.outreach.searches.create.useMutation({
@@ -77,20 +79,27 @@ function SearchModal({ onClose }: { onClose: () => void }) {
       query: category,
       location,
       filters: {
-        minRating: minRating !== "any" ? parseFloat(minRating) : undefined,
-        mustHave: mustHave !== "none" ? mustHave : undefined,
+        // "Good reviews" toggle → minRating 4.0 + at least 10 reviews
+        ...(goodReviews ? { minRating: 4.0, minReviewCount: 10 } : {}),
+        ...(excludeWithWebsite ? { excludeWithWebsite: true } : {}),
+        ...(requireEmail ? { requireEmail: true } : {}),
       },
     });
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-brand-navy-900/60 pt-24 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-brand-navy-900/60 pt-20 backdrop-blur-sm">
       <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="p-5">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-brand-navy-900">
-              New Lead Search
-            </h2>
+            <div>
+              <h2 className="text-base font-semibold text-brand-navy-900">
+                New Lead Search
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Describe your ideal lead
+              </p>
+            </div>
             <button
               onClick={onClose}
               className="rounded p-1 text-slate-400 hover:bg-slate-100"
@@ -99,19 +108,20 @@ function SearchModal({ onClose }: { onClose: () => void }) {
             </button>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">
-                Business Category
+                Business category
               </label>
               <input
                 type="text"
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g., NDIS Provider, Physiotherapist..."
+                placeholder="e.g., plumber, physiotherapist, cafe"
                 className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
               />
             </div>
+
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">
                 Location
@@ -120,58 +130,52 @@ function SearchModal({ onClose }: { onClose: () => void }) {
                 type="text"
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
-                placeholder="e.g., Melbourne VIC, 3000..."
+                placeholder="e.g., Melbourne VIC, Richmond, 3121"
                 className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 focus:border-brand-teal focus:outline-none focus:ring-1 focus:ring-brand-teal"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Min Rating
-                </label>
-                <select
-                  value={minRating}
-                  onChange={(e) => setMinRating(e.target.value)}
-                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900"
-                >
-                  <option value="any">Any</option>
-                  <option value="3.0">3.0+</option>
-                  <option value="3.5">3.5+</option>
-                  <option value="4.0">4.0+</option>
-                  <option value="4.5">4.5+</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Must Have
-                </label>
-                <select
-                  value={mustHave}
-                  onChange={(e) => setMustHave(e.target.value)}
-                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900"
-                >
-                  <option value="none">No filter</option>
-                  <option value="email">Email</option>
-                  <option value="website">Website</option>
-                  <option value="phone">Phone</option>
-                </select>
+
+            {/* Criteria checkboxes */}
+            <div>
+              <label className="mb-2 block text-xs font-medium text-slate-500">
+                Criteria
+              </label>
+              <div className="space-y-2">
+                <CriteriaToggle
+                  label="Good reviews (4.0★ and 10+ reviews)"
+                  checked={goodReviews}
+                  onChange={setGoodReviews}
+                />
+                <CriteriaToggle
+                  label="No website (outreach opportunity)"
+                  checked={excludeWithWebsite}
+                  onChange={setExcludeWithWebsite}
+                />
+                <CriteriaToggle
+                  label="Must have a contact email"
+                  checked={requireEmail}
+                  onChange={setRequireEmail}
+                />
               </div>
             </div>
 
-            <div className="flex items-center gap-2 rounded-md bg-brand-teal/5 p-2 text-xs text-teal-700">
-              <Sparkles className="h-4 w-4" />
+            <div className="flex items-start gap-2 rounded-md bg-brand-teal/5 p-2.5 text-xs text-teal-700">
+              <Sparkles className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <span>
-                AI will auto-analyse reviews and score leads after scraping
+                After scraping, leads are auto-ranked by opportunity score.
+                Click the top ones to run Deep Analyse for pain points.
               </span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-5 py-3">
-          <span className="text-xs text-slate-400">
-            Est. cost: ~$0.15 for 50 leads
-          </span>
-          <div className="flex gap-2">
+          {createSearch.error && (
+            <span className="text-xs text-red-500">
+              {createSearch.error.message}
+            </span>
+          )}
+          <div className="ml-auto flex gap-2">
             <button
               onClick={onClose}
               className="px-3 py-1.5 text-sm text-slate-500"
@@ -180,15 +184,53 @@ function SearchModal({ onClose }: { onClose: () => void }) {
             </button>
             <button
               onClick={handleSubmit}
-              disabled={createSearch.isPending}
+              disabled={createSearch.isPending || !category.trim() || !location.trim()}
               className="flex items-center gap-1.5 rounded-md bg-brand-teal px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-brand-teal-600 disabled:opacity-50"
             >
-              {createSearch.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
-              Search
+              {createSearch.isPending ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" /> Scraping...
+                </>
+              ) : (
+                <>
+                  <Search className="h-3 w-3" /> Scrape & Rank
+                </>
+              )}
             </button>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function CriteriaToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm text-brand-navy-900 transition-colors hover:bg-slate-50">
+      <div
+        className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+          checked
+            ? "border-brand-teal bg-brand-teal"
+            : "border-slate-300 bg-white"
+        }`}
+      >
+        {checked && <Check className="h-3 w-3 text-white" strokeWidth={3} />}
+      </div>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="sr-only"
+      />
+      <span>{label}</span>
+    </label>
   );
 }

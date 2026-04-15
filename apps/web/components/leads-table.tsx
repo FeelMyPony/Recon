@@ -38,6 +38,7 @@ interface TableLead {
   website: string | null;
   status: "new" | "qualified" | "contacted" | "proposal" | "converted" | "rejected";
   score: "hot" | "warm" | "cold" | "unscored";
+  opportunityScore: number;
   lat: number;
   lng: number;
   painPoints: string[];
@@ -58,13 +59,14 @@ function toTableLeads(raw: Array<Record<string, any>>): TableLead[] {
     website: l.website ?? null,
     status: l.status ?? "new",
     score: l.score ?? "unscored",
+    opportunityScore: Number(l.opportunityScore ?? l.opportunity_score ?? 0),
     lat: Number(l.lat ?? 0),
     lng: Number(l.lng ?? 0),
     painPoints: l.painPoints ?? [],
   }));
 }
 
-type SortField = "name" | "rating" | "reviewCount" | "score" | "status";
+type SortField = "name" | "rating" | "reviewCount" | "score" | "status" | "opportunityScore";
 type SortDir = "asc" | "desc";
 
 const STATUS_CONFIG = {
@@ -89,7 +91,7 @@ export function LeadsTable() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [scoreFilter, setScoreFilter] = useState("all");
-  const [sortField, setSortField] = useState<SortField>("score");
+  const [sortField, setSortField] = useState<SortField>("opportunityScore");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -180,6 +182,10 @@ export function LeadsTable() {
           break;
         case "status":
           cmp = a.status.localeCompare(b.status);
+          break;
+        case "opportunityScore":
+          // Higher score = higher priority, so invert for "asc" intuition
+          cmp = b.opportunityScore - a.opportunityScore;
           break;
       }
       return sortDir === "desc" ? -cmp : cmp;
@@ -362,8 +368,14 @@ export function LeadsTable() {
                   Contact
                 </th>
                 <th
-                  onClick={() => toggleSort("score")}
+                  onClick={() => toggleSort("opportunityScore")}
                   className="group sticky top-0 z-10 cursor-pointer border-b border-slate-200 bg-slate-50 px-3 py-2.5 text-center font-semibold text-slate-500"
+                >
+                  <span className="inline-flex items-center gap-1">Opportunity <SortIcon field="opportunityScore" /></span>
+                </th>
+                <th
+                  onClick={() => toggleSort("score")}
+                  className="group sticky top-0 z-10 hidden cursor-pointer border-b border-slate-200 bg-slate-50 px-3 py-2.5 text-center font-semibold text-slate-500 xl:table-cell"
                 >
                   <span className="inline-flex items-center gap-1">Score <SortIcon field="score" /></span>
                 </th>
@@ -443,7 +455,28 @@ export function LeadsTable() {
                         )}
                       </div>
                     </td>
-                    <td className="px-3 py-2.5 text-center">
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center justify-center gap-1.5">
+                        <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-100">
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${lead.opportunityScore}%`,
+                              background:
+                                lead.opportunityScore >= 70
+                                  ? "#00BFA6"
+                                  : lead.opportunityScore >= 40
+                                    ? "#f59e0b"
+                                    : "#cbd5e1",
+                            }}
+                          />
+                        </div>
+                        <span className="w-7 text-right text-[11px] font-semibold tabular-nums text-brand-navy-900">
+                          {lead.opportunityScore}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="hidden px-3 py-2.5 text-center xl:table-cell">
                       <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ${sc.classes} ${sc.bg}`}>
                         {sc.icon} {sc.label}
                       </span>

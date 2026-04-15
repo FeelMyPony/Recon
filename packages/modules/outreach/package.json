@@ -16,8 +16,10 @@
     "@recon/shared": "workspace:*",
     "@recon/events": "workspace:*",
     "@recon/logger": "workspace:*",
+    "@react-pdf/renderer": "3.4.5",
     "@trpc/server": "^11.0.0",
     "drizzle-orm": "^0.38.0",
+    "react": "^19.0.0",
     "superjson": "^2.2.0",
     "zod": "^3.24.0"
   },

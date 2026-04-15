@@ -13,10 +13,16 @@ import { activityLog } from "../shared/schema/activity";
 import { pitchPages } from "./schema/pitch-pages";
 import { createTRPCRouter, protectedProcedure } from "./trpc";
 import { TRPCError } from "@trpc/server";
-import { scrapeSearch } from "./services/scraper";
+import {
+  scrapeSearch,
+  fetchReviews,
+  computeOpportunityScore,
+} from "./services/scraper";
 import { analyseLead, analyseLeads } from "./services/analyser";
 import { draftEmail } from "./services/email-drafter";
 import { generatePitchPage } from "./services/pitch-generator";
+import { generateProposalPdf } from "./services/proposal-pdf";
+import { sendEmail } from "./services/emailer";
 
 export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
@@ -53,7 +59,7 @@ export const outreachRouter = createTRPCRouter({
           .select()
           .from(leads)
           .where(and(...conditions))
-          .orderBy(desc(leads.createdAt))
+          .orderBy(desc(leads.opportunityScore), desc(leads.createdAt))
           .limit(input.limit)
           .offset(input.offset);
 
@@ -449,7 +455,18 @@ export const outreachRouter = createTRPCRouter({
         z.object({
           query: z.string().min(1),
           location: z.string().min(1),
-          filters: z.record(z.unknown()).optional(),
+          filters: z
+            .object({
+              /** Only keep leads with rating >= this value (e.g., 4.0) */
+              minRating: z.number().min(0).max(5).optional(),
+              /** Only keep leads with at least this many reviews */
+              minReviewCount: z.number().min(0).optional(),
+              /** If true, exclude leads that already have a website */
+              excludeWithWebsite: z.boolean().optional(),
+              /** If true, only keep leads that have an email */
+              requireEmail: z.boolean().optional(),
+            })
+            .optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1481,6 +1498,154 @@ export const outreachRouter = createTRPCRouter({
 
         return row;
       }),
+
+    // ──────────────────────────────────────────────
+    // Send — actually deliver the email via Resend
+    // ──────────────────────────────────────────────
+    send: protectedProcedure
+      .input(
+        z.object({
+          emailId: z.string().uuid(),
+          attachProposalPdf: z.boolean().default(false),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // 1. Load email record
+        const [emailRecord] = await ctx.db
+          .select()
+          .from(outreachEmails)
+          .where(
+            and(
+              eq(outreachEmails.id, input.emailId),
+              eq(outreachEmails.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
+        if (!emailRecord) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Email not found" });
+        }
+        if (emailRecord.status === "sent") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Email has already been sent",
+          });
+        }
+
+        // 2. Load lead (for merge-field rendering)
+        const [lead] = await ctx.db
+          .select()
+          .from(leads)
+          .where(eq(leads.id, emailRecord.leadId))
+          .limit(1);
+
+        if (!lead) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Lead not found" });
+        }
+
+        // 3. Render merge fields
+        const renderMergeFields = (template: string): string => {
+          const nameParts = (lead.name ?? "").split(" ");
+          const firstName = nameParts[0] ?? "";
+          const lastName = nameParts.slice(1).join(" ");
+          const fields: Record<string, string> = {
+            "{{business_name}}": lead.name ?? "",
+            "{{first_name}}": firstName,
+            "{{last_name}}": lastName,
+            "{{category}}": lead.category ?? "",
+            "{{suburb}}": lead.suburb ?? "",
+            "{{state}}": lead.state ?? "",
+            "{{website}}": lead.website ?? "",
+            "{{phone}}": lead.phone ?? "",
+            "{{rating}}": String(lead.rating ?? ""),
+          };
+          let out = template;
+          for (const [k, v] of Object.entries(fields)) {
+            out = out.replaceAll(k, v);
+          }
+          return out;
+        };
+
+        const renderedSubject = renderMergeFields(emailRecord.subject);
+        // Convert plain-text body to simple HTML (newlines → <br>)
+        const renderedBody = renderMergeFields(emailRecord.body);
+        const html = renderedBody.includes("<")
+          ? renderedBody
+          : `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;">${renderedBody.replaceAll("\n", "<br>")}</div>`;
+
+        // 4. Build attachments if requested
+        const attachments: Array<{ filename: string; content: string }> = [];
+        if (input.attachProposalPdf) {
+          const [pdfRow] = await ctx.db
+            .select({ pdfBytes: pitchPages.pdfBytes })
+            .from(pitchPages)
+            .where(
+              and(
+                eq(pitchPages.leadId, emailRecord.leadId),
+                eq(pitchPages.workspaceId, ctx.workspaceId),
+              ),
+            )
+            .orderBy(desc(pitchPages.createdAt))
+            .limit(1);
+
+          if (pdfRow?.pdfBytes) {
+            const safeName = (lead.name ?? "proposal").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+            attachments.push({
+              filename: `${safeName}-proposal.pdf`,
+              content: Buffer.from(pdfRow.pdfBytes).toString("base64"),
+            });
+          }
+        }
+
+        // 5. Send via Resend
+        const { messageId } = await sendEmail({
+          to: emailRecord.toEmail,
+          subject: renderedSubject,
+          html,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        });
+
+        // 6. Update email record
+        const now = new Date();
+        await ctx.db
+          .update(outreachEmails)
+          .set({
+            status: "sent",
+            sentAt: now,
+            providerMessageId: messageId,
+          })
+          .where(eq(outreachEmails.id, input.emailId));
+
+        // 7. Update lead's last-contacted timestamp + bump status
+        await ctx.db
+          .update(leads)
+          .set({
+            lastContactedAt: now,
+            updatedAt: now,
+            status: lead.status === "new" ? "contacted" : lead.status,
+          })
+          .where(eq(leads.id, emailRecord.leadId));
+
+        // 8. Log activity
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            leadId: emailRecord.leadId,
+            action: "email_sent",
+            details: {
+              emailId: input.emailId,
+              toEmail: emailRecord.toEmail,
+              messageId,
+              attachedProposal: attachments.length > 0,
+            },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log email_sent:", e);
+        }
+
+        return { sent: true, messageId, attachedProposal: attachments.length > 0 };
+      }),
   }),
 
   // ──────────────────────────────────────────────
@@ -1745,6 +1910,26 @@ export const outreachRouter = createTRPCRouter({
           "-" +
           Date.now().toString(36);
 
+        // Generate PDF version in parallel (server-side with @react-pdf/renderer)
+        let pdfBytes: Buffer | undefined;
+        try {
+          pdfBytes = await generateProposalPdf({
+            leadName: lead.name,
+            category: lead.category ?? "",
+            suburb: lead.suburb ?? "",
+            state: lead.state ?? "",
+            rating: String(lead.rating ?? "0"),
+            reviewCount: lead.reviewCount ?? 0,
+            painPoints: (analysis?.weaknesses as string[]) ?? [],
+            strengths: (analysis?.strengths as string[]) ?? [],
+            opportunities: (analysis?.opportunities as string[]) ?? [],
+            serviceDescription: serviceDesc,
+            senderName,
+          });
+        } catch (err) {
+          console.warn("[pitchPages] PDF generation failed, falling back to HTML only:", err);
+        }
+
         // Store in database
         const [page] = await ctx.db
           .insert(pitchPages)
@@ -1755,6 +1940,7 @@ export const outreachRouter = createTRPCRouter({
             urlSlug: slug,
             modelUsed: result.model,
             costCents: String(result.costCents),
+            pdfBytes: pdfBytes,
           })
           .returning();
 
@@ -1762,6 +1948,8 @@ export const outreachRouter = createTRPCRouter({
           id: page!.id,
           slug,
           url: `/api/pitch/${slug}`,
+          pdfUrl: pdfBytes ? `/api/pitch/${slug}/pdf` : null,
+          hasPdf: !!pdfBytes,
           model: result.model,
           costCents: result.costCents,
         };
@@ -1801,6 +1989,115 @@ export const outreachRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const result = await analyseLead(ctx.db, input.leadId, ctx.workspaceId);
       return result;
+    }),
+
+  // ──────────────────────────────────────────────
+  // DEEP ANALYSE — fetch 20 reviews from Outscraper + AI pain point extraction
+  // ──────────────────────────────────────────────
+
+  deepAnalyse: protectedProcedure
+    .input(z.object({ leadId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      // 1. Load lead
+      const [lead] = await ctx.db
+        .select()
+        .from(leads)
+        .where(
+          and(
+            eq(leads.id, input.leadId),
+            eq(leads.workspaceId, ctx.workspaceId),
+          ),
+        )
+        .limit(1);
+
+      if (!lead) throw new TRPCError({ code: "NOT_FOUND", message: "Lead not found" });
+      if (!lead.googlePlaceId) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Lead has no Google Place ID — cannot fetch reviews",
+        });
+      }
+
+      // 2. Fetch reviews from Outscraper (top 20 newest)
+      const outscraperReviews = await fetchReviews(lead.googlePlaceId, 20);
+      console.log("[deepAnalyse] Fetched", outscraperReviews.length, "reviews for", lead.name);
+
+      // 3. Upsert reviews into DB (dedupe by outscraperId)
+      let insertedCount = 0;
+      for (const r of outscraperReviews) {
+        if (!r.review_id) continue;
+
+        // Check if review already exists
+        const existing = await ctx.db
+          .select({ id: reviews.id })
+          .from(reviews)
+          .where(
+            and(
+              eq(reviews.leadId, lead.id),
+              eq(reviews.outscraperId, r.review_id),
+            ),
+          )
+          .limit(1);
+
+        if (existing.length > 0) continue;
+
+        await ctx.db.insert(reviews).values({
+          leadId: lead.id,
+          workspaceId: ctx.workspaceId,
+          author: r.author_title ?? null,
+          rating: r.review_rating ?? null,
+          text: r.review_text ?? null,
+          ownerReply: r.owner_answer ?? null,
+          publishedAt: r.review_datetime_utc ? new Date(r.review_datetime_utc) : null,
+          outscraperId: r.review_id,
+        });
+        insertedCount++;
+      }
+
+      // 4. Run AI analysis on the (now-populated) reviews
+      const analysis = await analyseLead(ctx.db, lead.id, ctx.workspaceId);
+
+      // 5. Recompute opportunity score with real pain points
+      const painPointCount = (analysis?.weaknesses.length ?? 0) + (analysis?.opportunities.length ?? 0);
+      const newScore = computeOpportunityScore({
+        hasWebsite: !!lead.website,
+        hasEmail: !!lead.email,
+        rating: lead.rating ? Number(lead.rating) : 0,
+        reviewCount: lead.reviewCount ?? 0,
+        painPointCount,
+      });
+
+      await ctx.db
+        .update(leads)
+        .set({ opportunityScore: newScore, updatedAt: new Date() })
+        .where(eq(leads.id, lead.id));
+
+      // 6. Log activity (best-effort)
+      try {
+        await ctx.db.insert(activityLog).values({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          leadId: lead.id,
+          action: "deep_analysed",
+          details: {
+            leadName: lead.name,
+            reviewsFetched: outscraperReviews.length,
+            reviewsInserted: insertedCount,
+            painPointCount,
+            newOpportunityScore: newScore,
+          },
+        });
+      } catch (e) {
+        console.warn("[activity] Failed to log deep_analysed:", e);
+      }
+
+      return {
+        reviewsFetched: outscraperReviews.length,
+        reviewsInserted: insertedCount,
+        painPointCount,
+        newOpportunityScore: newScore,
+        analysis,
+      };
     }),
 
   searchStatus: protectedProcedure
