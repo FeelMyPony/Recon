@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Loader } from "@googlemaps/js-api-loader";
 import {
@@ -245,6 +246,7 @@ type DrawMode = "none" | "radius" | "polygon";
 export function MapView() {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   const mapId = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID;
+  const router = useRouter();
 
   // Refs
   const mapDivRef = useRef<HTMLDivElement | null>(null);
@@ -404,13 +406,32 @@ export function MapView() {
       clustererRef.current.clearMarkers();
     }
     if (fresh.length > 0) {
+      // Build reverse lookup: marker → leadId (for cluster bulk select)
+      const markerToId = new Map<google.maps.Marker, string>();
+      for (const [id, m] of existing) markerToId.set(m, id);
+
       clustererRef.current = new MarkerClusterer({
         map,
         markers: fresh,
         algorithm: new SuperClusterAlgorithm({ radius: 60, maxZoom: 14 }),
+        onClusterClick: (event, cluster) => {
+          const clusterMarkers = (cluster.markers ?? []) as google.maps.Marker[];
+          const ids = clusterMarkers
+            .map((m) => markerToId.get(m))
+            .filter((x): x is string => Boolean(x));
+          if (ids.length === 0) return;
+          // Stash selection + navigate to leads table
+          try {
+            sessionStorage.setItem(
+              "recon:bulk-select",
+              JSON.stringify({ ids, ts: Date.now() }),
+            );
+          } catch {}
+          router.push(`/leads?select=${ids.length}`);
+        },
       });
     }
-  }, [activeLeads, mapReady]);
+  }, [activeLeads, mapReady, router]);
 
   // ───────── Draw mode handlers ─────────
   const clearDrawing = useCallback(() => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import {
   Star,
   Search,
@@ -92,6 +92,21 @@ const SCORE_CONFIG = {
 export function LeadsTable() {
   const [selectedLead, setSelectedLead] = useState<TableLead | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Hydrate selection from map cluster click (stored in sessionStorage)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = sessionStorage.getItem("recon:bulk-select");
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { ids: string[]; ts: number };
+      // Only honour if set within the last 30s (stale protection)
+      if (Array.isArray(parsed.ids) && Date.now() - parsed.ts < 30_000) {
+        setSelectedIds(new Set(parsed.ids));
+      }
+      sessionStorage.removeItem("recon:bulk-select");
+    } catch {}
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [scoreFilter, setScoreFilter] = useState("all");
@@ -100,8 +115,9 @@ export function LeadsTable() {
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showBulkSend, setShowBulkSend] = useState(false);
+  const [showEnrollDialog, setShowEnrollDialog] = useState(false);
   const [bulkResult, setBulkResult] = useState<{
-    kind: "analyse" | "send";
+    kind: "analyse" | "send" | "enroll";
     total: number;
     succeeded: number;
   } | null>(null);
@@ -342,6 +358,14 @@ export function LeadsTable() {
                 Bulk Send
               </button>
               <button
+                onClick={() => setShowEnrollDialog(true)}
+                className="flex items-center gap-1 rounded bg-indigo-100 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 hover:bg-indigo-200"
+                title="Enroll selected leads into a drip sequence"
+              >
+                <Users className="h-3 w-3" />
+                Enroll
+              </button>
+              <button
                 className="rounded p-1 text-brand-teal hover:bg-brand-teal/10"
                 title="Export"
                 onClick={handleExportCsv}
@@ -578,6 +602,23 @@ export function LeadsTable() {
         </div>
       )}
 
+      {/* Enroll in Sequence dialog */}
+      {showEnrollDialog && (
+        <EnrollInSequenceDialog
+          leadIds={Array.from(selectedIds)}
+          onClose={() => setShowEnrollDialog(false)}
+          onComplete={(enrolled) => {
+            setBulkResult({
+              kind: "enroll",
+              total: selectedIds.size,
+              succeeded: enrolled,
+            });
+            setSelectedIds(new Set());
+            setShowEnrollDialog(false);
+          }}
+        />
+      )}
+
       {/* Bulk Send dialog */}
       {showBulkSend && (
         <BulkSendDialog
@@ -789,6 +830,94 @@ function BulkSendDialog({
             </button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Enroll in Sequence Dialog
+// ─────────────────────────────────────────────────────────────────────────
+
+function EnrollInSequenceDialog({
+  leadIds,
+  onClose,
+  onComplete,
+}: {
+  leadIds: string[];
+  onClose: () => void;
+  onComplete: (enrolled: number) => void;
+}) {
+  const sequencesQuery = trpc.outreach.sequences.list.useQuery();
+  const [sequenceId, setSequenceId] = useState<string>("");
+
+  const enroll = trpc.outreach.sequences.enroll.useMutation({
+    onSuccess: (data) => onComplete(data.enrolled),
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md overflow-hidden rounded-lg bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <h3 className="text-sm font-semibold text-slate-900">
+            Enroll {leadIds.length} {leadIds.length === 1 ? "lead" : "leads"} in sequence
+          </h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-3 px-5 py-4">
+          <label className="block text-xs font-medium text-slate-700">
+            Sequence
+          </label>
+          <select
+            value={sequenceId}
+            onChange={(e) => setSequenceId(e.target.value)}
+            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+          >
+            <option value="">Select a sequence…</option>
+            {sequencesQuery.data?.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.stepCount} step{s.stepCount === 1 ? "" : "s"})
+              </option>
+            ))}
+          </select>
+
+          <p className="text-xs text-slate-500">
+            First email fires on the next hourly cron tick. Already-enrolled leads
+            are skipped. Replies / bounces auto-stop progression.
+          </p>
+
+          {enroll.error && (
+            <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+              {enroll.error.message}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-slate-500">
+            Cancel
+          </button>
+          <button
+            onClick={() => sequenceId && enroll.mutate({ sequenceId, leadIds })}
+            disabled={!sequenceId || enroll.isPending}
+            className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {enroll.isPending ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Enrolling…
+              </>
+            ) : (
+              <>
+                <Users className="h-3 w-3" />
+                Enroll {leadIds.length}
+              </>
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { searches } from "./schema/searches";
 import { outreachEmails } from "./schema/emails";
 import { emailTemplates } from "./schema/templates";
 import { sequences, sequenceSteps } from "./schema/sequences";
+import { sequenceEnrollments } from "./schema/sequence-enrollments";
 import { workspaces } from "../shared/schema/workspaces";
 import { users } from "../shared/schema/auth";
 import { workspaceMembers } from "../shared/schema/members";
@@ -23,6 +24,7 @@ import { draftEmail } from "./services/email-drafter";
 import { generatePitchPage } from "./services/pitch-generator";
 import { generateProposalPdf } from "./services/proposal-pdf";
 import { sendEmail } from "./services/emailer";
+import { enrollLeadsInSequence } from "./services/sequences";
 
 export const outreachRouter = createTRPCRouter({
   // ──────────────────────────────────────────────
@@ -225,13 +227,71 @@ export const outreachRouter = createTRPCRouter({
           .select()
           .from(leads)
           .where(and(...conditions))
-          .orderBy(desc(leads.createdAt));
+          .orderBy(desc(leads.opportunityScore), desc(leads.createdAt));
 
-        // Build CSV
+        const leadIds = result.map((l) => l.id);
+
+        // Pain points per lead (latest review analysis)
+        const painPointsByLead = new Map<string, string[]>();
+        const aiScoreByLead = new Map<string, number>();
+        if (leadIds.length > 0) {
+          const analyses = await ctx.db
+            .select({
+              leadId: reviewAnalyses.leadId,
+              weaknesses: reviewAnalyses.weaknesses,
+              aiScore: reviewAnalyses.aiScore,
+              createdAt: reviewAnalyses.createdAt,
+            })
+            .from(reviewAnalyses)
+            .where(sql`${reviewAnalyses.leadId} = ANY(${leadIds})`)
+            .orderBy(desc(reviewAnalyses.createdAt));
+          // Keep first (latest) per lead
+          for (const a of analyses) {
+            if (!painPointsByLead.has(a.leadId)) {
+              painPointsByLead.set(a.leadId, (a.weaknesses as string[]) ?? []);
+              if (a.aiScore != null) aiScoreByLead.set(a.leadId, Number(a.aiScore));
+            }
+          }
+        }
+
+        // Email aggregates per lead: total sent, last status, last sent_at
+        const emailStatsByLead = new Map<
+          string,
+          { sent: number; lastStatus: string | null; lastSentAt: Date | null }
+        >();
+        if (leadIds.length > 0) {
+          const emailAgg = await ctx.db
+            .select({
+              leadId: outreachEmails.leadId,
+              status: outreachEmails.status,
+              sentAt: outreachEmails.sentAt,
+              createdAt: outreachEmails.createdAt,
+            })
+            .from(outreachEmails)
+            .where(sql`${outreachEmails.leadId} = ANY(${leadIds})`)
+            .orderBy(desc(outreachEmails.createdAt));
+          for (const e of emailAgg) {
+            const entry = emailStatsByLead.get(e.leadId) ?? {
+              sent: 0,
+              lastStatus: null as string | null,
+              lastSentAt: null as Date | null,
+            };
+            if (e.status && e.status !== "draft") entry.sent += 1;
+            if (entry.lastStatus == null) {
+              entry.lastStatus = e.status ?? null;
+              entry.lastSentAt = e.sentAt ?? null;
+            }
+            emailStatsByLead.set(e.leadId, entry);
+          }
+        }
+
+        // Build CSV — enriched columns
         const headers = [
           "Name", "Category", "Suburb", "State", "Postcode",
           "Rating", "Reviews", "Email", "Phone", "Website",
-          "Status", "Score", "Google Maps URL",
+          "Status", "Score", "Opportunity Score", "AI Score",
+          "Pain Points", "Emails Sent", "Last Email Status",
+          "Last Sent At", "Last Contacted At", "Google Maps URL",
         ];
 
         const escapeField = (val: string | number | null | undefined) => {
@@ -243,8 +303,11 @@ export const outreachRouter = createTRPCRouter({
           return str;
         };
 
-        const rows = result.map((lead) =>
-          [
+        const rows = result.map((lead) => {
+          const painPoints = painPointsByLead.get(lead.id) ?? [];
+          const aiScore = aiScoreByLead.get(lead.id);
+          const stats = emailStatsByLead.get(lead.id);
+          return [
             lead.name,
             lead.category,
             lead.suburb,
@@ -257,11 +320,18 @@ export const outreachRouter = createTRPCRouter({
             lead.website,
             lead.status,
             lead.score,
+            lead.opportunityScore,
+            aiScore ?? "",
+            painPoints.join(" | "),
+            stats?.sent ?? 0,
+            stats?.lastStatus ?? "",
+            stats?.lastSentAt ? stats.lastSentAt.toISOString() : "",
+            lead.lastContactedAt ? lead.lastContactedAt.toISOString() : "",
             lead.googleMapsUrl,
           ]
             .map(escapeField)
-            .join(","),
-        );
+            .join(",");
+        });
 
         return [headers.join(","), ...rows].join("\n");
       }),
@@ -1069,6 +1139,87 @@ export const outreachRouter = createTRPCRouter({
         }
         return { success: true };
       }),
+
+    // ──────────────────────────────────────────────
+    // Enrollments — lead progression through a sequence
+    // ──────────────────────────────────────────────
+
+    /** Enroll up to 100 leads in a sequence. First step fires on next cron tick. */
+    enroll: protectedProcedure
+      .input(
+        z.object({
+          sequenceId: z.string().uuid(),
+          leadIds: z.array(z.string().uuid()).min(1).max(100),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const r = await enrollLeadsInSequence(
+          ctx.workspaceId,
+          input.sequenceId,
+          input.leadIds,
+        );
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            action: "sequence_enrolled",
+            details: {
+              sequenceId: input.sequenceId,
+              enrolled: r.enrolled,
+              skipped: r.skipped,
+            },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log sequence_enrolled:", e);
+        }
+        return r;
+      }),
+
+    /** Manually stop an active enrollment. */
+    stopEnrollment: protectedProcedure
+      .input(z.object({ enrollmentId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        const [row] = await ctx.db
+          .update(sequenceEnrollments)
+          .set({ status: "stopped_manual", updatedAt: new Date() })
+          .where(
+            and(
+              eq(sequenceEnrollments.id, input.enrollmentId),
+              eq(sequenceEnrollments.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .returning();
+        return row ?? null;
+      }),
+
+    /** List enrollments for a sequence with lead names. */
+    listEnrollments: protectedProcedure
+      .input(z.object({ sequenceId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        const rows = await ctx.db
+          .select({
+            id: sequenceEnrollments.id,
+            leadId: sequenceEnrollments.leadId,
+            leadName: leads.name,
+            leadEmail: leads.email,
+            currentStep: sequenceEnrollments.currentStep,
+            status: sequenceEnrollments.status,
+            nextSendAt: sequenceEnrollments.nextSendAt,
+            lastError: sequenceEnrollments.lastError,
+            createdAt: sequenceEnrollments.createdAt,
+          })
+          .from(sequenceEnrollments)
+          .leftJoin(leads, eq(sequenceEnrollments.leadId, leads.id))
+          .where(
+            and(
+              eq(sequenceEnrollments.sequenceId, input.sequenceId),
+              eq(sequenceEnrollments.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .orderBy(desc(sequenceEnrollments.createdAt))
+          .limit(200);
+        return rows;
+      }),
   }),
 
   // ──────────────────────────────────────────────
@@ -1645,6 +1796,112 @@ export const outreachRouter = createTRPCRouter({
         }
 
         return { sent: true, messageId, attachedProposal: attachments.length > 0 };
+      }),
+
+    /**
+     * Mark an email (and its lead) as replied. Used manually from the UI
+     * when a prospect responds — also auto-stops any in-progress sequence
+     * enrollment for that lead.
+     */
+    markReplied: protectedProcedure
+      .input(
+        z.object({
+          emailId: z.string().uuid().optional(),
+          leadId: z.string().uuid().optional(),
+        }).refine((v) => v.emailId || v.leadId, {
+          message: "Provide emailId or leadId",
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const now = new Date();
+
+        // Resolve target: most recent sent email for this lead if only leadId given
+        let targetEmailId = input.emailId;
+        let leadId = input.leadId;
+
+        if (!targetEmailId && leadId) {
+          const [row] = await ctx.db
+            .select({ id: outreachEmails.id })
+            .from(outreachEmails)
+            .where(
+              and(
+                eq(outreachEmails.leadId, leadId),
+                eq(outreachEmails.workspaceId, ctx.workspaceId),
+              ),
+            )
+            .orderBy(desc(outreachEmails.sentAt))
+            .limit(1);
+          targetEmailId = row?.id;
+        }
+
+        if (targetEmailId) {
+          const [updated] = await ctx.db
+            .update(outreachEmails)
+            .set({ status: "replied", repliedAt: now })
+            .where(
+              and(
+                eq(outreachEmails.id, targetEmailId),
+                eq(outreachEmails.workspaceId, ctx.workspaceId),
+              ),
+            )
+            .returning();
+          if (updated) leadId = updated.leadId;
+        }
+
+        if (!leadId) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "No matching email/lead found",
+          });
+        }
+
+        // Update lead status → converted? No, "contacted" is too weak. Use proposal
+        // if not already further along, preserve converted/rejected.
+        const [lead] = await ctx.db
+          .select()
+          .from(leads)
+          .where(
+            and(
+              eq(leads.id, leadId),
+              eq(leads.workspaceId, ctx.workspaceId),
+            ),
+          )
+          .limit(1);
+
+        if (lead && lead.status !== "converted" && lead.status !== "rejected") {
+          await ctx.db
+            .update(leads)
+            .set({ status: "proposal", updatedAt: now })
+            .where(eq(leads.id, leadId));
+        }
+
+        // Auto-stop any active sequence enrollment for this lead
+        try {
+          await ctx.db.execute(
+            sql`UPDATE sequence_enrollments
+                SET status = 'stopped_replied', updated_at = NOW()
+                WHERE lead_id = ${leadId}
+                  AND workspace_id = ${ctx.workspaceId}
+                  AND status = 'active'`,
+          );
+        } catch (e) {
+          // Table may not exist yet (before migration) — non-fatal
+        }
+
+        // Log activity
+        try {
+          await ctx.db.insert(activityLog).values({
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            leadId,
+            action: "lead_replied",
+            details: { emailId: targetEmailId },
+          });
+        } catch (e) {
+          console.warn("[activity] Failed to log lead_replied:", e);
+        }
+
+        return { replied: true, leadId, emailId: targetEmailId };
       }),
   }),
 

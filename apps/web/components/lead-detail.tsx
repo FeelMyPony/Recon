@@ -11,6 +11,7 @@ import {
   Target,
   Loader2,
   CheckCircle2,
+  Reply,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
 
@@ -188,6 +189,7 @@ export function LeadDetail({
             <Sparkles className="h-4 w-4" />{" "}
             {lead.email ? "Compose & Send Email" : "No email address"}
           </button>
+          <MarkRepliedButton leadId={lead.id} currentStatus={lead.status} />
         </div>
       </div>
 
@@ -363,6 +365,57 @@ function DeepAnalyseButton({ leadId }: { leadId: string }) {
       {deepAnalyse.error && (
         <span className="text-xs text-red-500">{deepAnalyse.error.message}</span>
       )}
+    </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mark as Replied — manual reply flag
+// ─────────────────────────────────────────────────────────────────────────
+
+function MarkRepliedButton({
+  leadId,
+  currentStatus,
+}: {
+  leadId: string;
+  currentStatus: string;
+}) {
+  const utils = trpc.useUtils();
+  const [done, setDone] = useState(false);
+
+  const markReplied = trpc.outreach.emails.markReplied.useMutation({
+    onSuccess: () => {
+      setDone(true);
+      utils.outreach.leads.getById.invalidate({ id: leadId });
+      utils.outreach.leads.list.invalidate();
+    },
+  });
+
+  if (done || currentStatus === "proposal" || currentStatus === "converted") {
+    return (
+      <div className="flex items-center justify-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+        <CheckCircle2 className="h-3.5 w-3.5" />
+        Lead has replied
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => {
+        if (confirm("Mark this lead as replied? This will stop any active sequence.")) {
+          markReplied.mutate({ leadId });
+        }
+      }}
+      disabled={markReplied.isPending}
+      className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
+    >
+      {markReplied.isPending ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <Reply className="h-4 w-4" />
+      )}
+      Mark as Replied
     </button>
   );
 }
