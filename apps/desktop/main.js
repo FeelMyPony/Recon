@@ -11,12 +11,71 @@
 
 const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
 const { spawn } = require("child_process");
+const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const os = require("os");
 
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const APP_URL = "http://localhost:3000";
-const STARTUP_TIMEOUT_MS = 90_000;
+const STARTUP_TIMEOUT_MS = 120_000;
+
+/**
+ * Resolve the repo root that holds pnpm-workspace.yaml + apps/web.
+ *
+ * When run via `electron .` from source, __dirname is apps/desktop/ and
+ * we can just go up two levels. When run from a packaged .app, __dirname
+ * is inside RECON.app/Contents/Resources/app/ so that trick breaks.
+ *
+ * Resolution order:
+ *   1. $RECON_REPO env var (explicit override)
+ *   2. ~/.recon/repo-path.txt (first-line of file)
+ *   3. Relative walk-up from __dirname looking for pnpm-workspace.yaml
+ *   4. Hardcoded fallback (the author's dev path)
+ */
+function resolveRepoRoot() {
+  if (process.env.RECON_REPO && fs.existsSync(process.env.RECON_REPO)) {
+    return process.env.RECON_REPO;
+  }
+
+  const configFile = path.join(os.homedir(), ".recon", "repo-path.txt");
+  if (fs.existsSync(configFile)) {
+    const p = fs.readFileSync(configFile, "utf8").trim();
+    if (p && fs.existsSync(p)) return p;
+  }
+
+  // Walk up from __dirname — works when running unpackaged via `electron .`
+  let dir = __dirname;
+  for (let i = 0; i < 8; i++) {
+    if (fs.existsSync(path.join(dir, "pnpm-workspace.yaml"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  // Hardcoded fallback — this Mac's known dev location
+  const fallback = path.join(
+    os.homedir(),
+    "Downloads",
+    "Outreach Automation",
+    "recon",
+  );
+  if (fs.existsSync(path.join(fallback, "pnpm-workspace.yaml"))) return fallback;
+
+  return null;
+}
+
+const REPO_ROOT = resolveRepoRoot();
+
+// Persist successful resolution so the packaged .app can find it next time
+if (REPO_ROOT) {
+  try {
+    const dir = path.join(os.homedir(), ".recon");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "repo-path.txt"), REPO_ROOT);
+  } catch {
+    // non-fatal
+  }
+}
 
 let mainWindow = null;
 let nextProcess = null;
@@ -24,9 +83,19 @@ let nextProcess = null;
 // ─── Spawn Next.js dev server ───────────────────────────────────────────
 
 function startNextServer() {
+  if (!REPO_ROOT) {
+    dialog.showErrorBox(
+      "RECON — repo not found",
+      `Could not locate the RECON source repo.\n\nFix: create ~/.recon/repo-path.txt with the absolute path to the recon checkout, or set the RECON_REPO env var.`,
+    );
+    app.quit();
+    return;
+  }
   console.log("[recon] starting Next.js dev server from", REPO_ROOT);
 
   // Use login shell so PATH picks up nvm / brew / pnpm.
+  // `detached: true` puts the shell + its children in their own process group
+  // so we can kill the whole tree on app quit via process.kill(-pid).
   nextProcess = spawn(
     "/bin/zsh",
     ["-l", "-c", "pnpm --filter @recon/web dev"],
@@ -34,6 +103,7 @@ function startNextServer() {
       cwd: REPO_ROOT,
       env: { ...process.env, FORCE_COLOR: "0" },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     },
   );
 
